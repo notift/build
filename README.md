@@ -26,13 +26,31 @@ build wordt weggegooid. Wat hij aflevert is een image op `ghcr.io` dat het artef
 | `workflow/base-image.yml` | Het basisimage bouwen en publiceren. Met de hand te starten, niet vanzelf |
 | `notift.example.json` | Het manifest dat in de repo van een project komt |
 | `release.sh` | Zet deze map in de repo `notift/build`. Gaat zelf niet mee |
+| `verify.sh` | De stand bij GitHub, afleesbaar zonder door instellingenpagina's te klikken |
 
 ```
 ./checks/check-output-proof.sh                       zestien gevallen, weigeren en waarschuwen
 python3 checks/check_output.py dist notift.json      een echte uitvoer keuren
 ./release.sh                                         tonen wat er naar notift/build zou gaan
 ./release.sh --push v1                               publiceren en de tag verplaatsen
+./verify.sh                                          de stand bij GitHub
+./verify.sh prj_00001                                en dat project erbij
 ```
+
+## Waarom er een `verify.sh` is voor deze laag
+
+**Dit is de eerste laag die we niet bezitten.** Bij onze eigen machines is "staat het er echt" een
+script; bij GitHub was het een pagina in een browser. Op 4 september 2026 stonden er drie dingen
+stil verkeerd, en geen ervan was zichtbaar in de code hier:
+
+| | Wat er stil fout stond |
+|---|---|
+| 1 | Het deployeraccount had **schrijfrecht** op deze repo in plaats van leesrecht |
+| 2 | `access_level` stond op `none`, dus geen enkele repo mocht de workflow aanroepen |
+| 3 | De repo was prive, waardoor een projectrepo hem niet kon uitchecken |
+
+Alle drie geven nu rood. Wat het script **niet** nakijkt staat onderaan zijn eigen uitvoer, want een
+controle die zwijgt over wat hij niet ziet is de gevaarlijkste soort.
 
 ## Waar deze map en de repo `notift/build` zich toe verhouden
 
@@ -120,7 +138,7 @@ alles.
 
 | | Wat | Waar |
 |---|---|---|
-| 1 | ~~Een repo `notift/build` aanmaken met een tag `v1`~~ **Gedaan 2026-09-04.** Prive, `v1` staat, en GitHub herkent beide workflows. Publiceren gaat vanaf nu met `release.sh` | GitHub |
+| 1 | ~~Een repo `notift/build` aanmaken met een tag `v1`~~ **Gedaan 2026-09-04.** **Publiek**, want een projectrepo kan een prive workflow-repo niet uitchecken. `v1` staat en publiceren gaat met `release.sh`. **Er komt nooit iets in deze repo dat niet openbaar mag zijn** | GitHub |
 | 2 | ~~Elke `uses:` vastzetten op een commit-hash~~ **Gedaan 2026-09-04.** Alle vier de actions staan vast op een hash, met de versie als commentaar erachter. Meteen ook naar de actuele hoofdversie, want alle vier stonden een major achter en draaien nu op node24. Nagekeken dat elke invoerwaarde die wij gebruiken daar nog bestaat | `workflow/build-and-publish.yml` |
 | 3 | ~~Het basisimage publiceren~~ **Gedaan 2026-09-04.** `ghcr.io/notift/static-base:1`, digest `sha256:753cf21b`. Nagemeten op het gepubliceerde image: geen root, poort 8080, en `/_health` antwoordde vanuit een alleen-lezen container | Eenmalig |
 | 4 | Het account `notift-deploy` leesrecht geven op het pakket, en een klassiek token met alleen `read:packages` op `web-01` zetten. Het account bestaat. **Let op: `notift` is een gebruikersaccount en geen organisatie**, dus dat gaat per pakket. Zie doel 3 in `docs/07-bouwlaag.md` | GitHub plus de machine |

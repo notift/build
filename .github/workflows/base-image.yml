@@ -78,6 +78,14 @@ jobs:
           test "$code" = "404" || { echo "::error::het gezondheidspad antwoordt niet, code $code"; exit 1; }
           echo "  ok   draait alleen-lezen en antwoordt op /_health"
 
+          # Een pagina die niet bestaat moet 404 teruggeven en geen 200. Dat is
+          # een keer misgegaan: try_files noemde /404.html als bestand, en dan
+          # serveert nginx die met 200. Een soft 404, en dat is precies wat doel
+          # 4 wil voorkomen. Deze controle vindt dat terug voordat het live gaat.
+          zacht="$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8080/bestaatniet || true)"
+          test "$zacht" = "404" || { echo "::error::een niet-bestaande pagina geeft $zacht in plaats van 404"; exit 1; }
+          echo "  ok   een niet-bestaande pagina geeft 404 en geen 200"
+
       - name: Wat je hierna nodig hebt
         run: |
           {
