@@ -1,0 +1,259 @@
+# De herbruikbare workflow van Notift. Doel 1 van docs/07-bouwlaag.md.
+#
+# Deze staat in de repo notift/build als .github/workflows/build-and-publish.yml
+# en wordt door elk project aangeroepen. Niet kopieren naar klantrepo's: dan
+# heb je twintig versies die uit elkaar lopen.
+#
+# Een project roept hem zo aan, met een vastgezette versie:
+#
+#   jobs:
+#     publiceren:
+#       uses: notift/build/.github/workflows/build-and-publish.yml@v1
+#       permissions:
+#         contents: read
+#         packages: write
+#
+# TWEE JOBS, EN DAT IS EEN GRENS EN GEEN OPMAAK.
+#
+# `bouwen` draait de code van de klant. Een `npm install` voert scripts uit die
+# hij geschreven heeft, dus die job heeft alleen leesrecht en ziet nooit het
+# token waarmee gepubliceerd wordt.
+#
+# `publiceren` draait geen enkele regel van de klant. Hij haalt het gebouwde
+# resultaat op als artefact, keurt het opnieuw, en pakt de Dockerfile uit onze
+# eigen repo in plaats van uit dat artefact. Dat laatste is het punt: het
+# artefact komt uit een job waar vreemde code in draaide, dus alles eruit is
+# invoer en geen configuratie.
+#
+# Waarom opnieuw keuren: het artefact is de brug tussen de twee jobs. Wat er in
+# job 1 gekeurd is, hoeft niet te zijn wat er in job 2 uit komt.
+#
+# Elke `uses:` hieronder staat vast op een commit-hash. Een tag kan verplaatst
+# worden, een hash niet, en dat is de enige manier om te weten welke code een
+# image van ons gebouwd heeft. De versie erachter staat er als commentaar, zodat
+# je kunt zien wat je hebt. Vastgezet 2026-09-04.
+#
+# Bijwerken is met opzet handwerk: haal de hash op met
+#   gh api repos/<owner>/<repo>/commits/<tag> --jq .sha
+# en controleer daarna of de invoerwaarden die wij gebruiken nog bestaan. Zolang
+# dit niet gebeurt komt een beveiligingsfix in een action hier niet binnen, en
+# dat is de prijs van vastzetten.
+
+name: Bouwen en publiceren
+
+on:
+  workflow_call:
+    inputs:
+      manifest:
+        description: "Pad naar het manifest in de repo van het project"
+        type: string
+        default: "notift.json"
+    outputs:
+      digest:
+        description: "De digest van het gepubliceerde image. Hierop wordt uitgerold"
+        value: ${{ jobs.publiceren.outputs.digest }}
+      build:
+        description: "Het buildnummer: datum plus commit"
+        value: ${{ jobs.bouwen.outputs.build }}
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Job 1: hier draait de code van de klant. Geen packages:write, geen token.
+  # ---------------------------------------------------------------------------
+  bouwen:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      build: ${{ steps.nummer.outputs.build }}
+      project: ${{ steps.manifest.outputs.project }}
+      customer: ${{ steps.manifest.outputs.customer }}
+      plan: ${{ steps.manifest.outputs.plan }}
+      package: ${{ steps.manifest.outputs.package }}
+
+    steps:
+      - name: De repo van het project
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: De bouwlaag van Notift
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: notift/build
+          path: .notift
+          ref: v1
+
+      - name: Het manifest lezen
+        id: manifest
+        run: |
+          set -euo pipefail
+          M="${{ inputs.manifest }}"
+          test -f "$M" || { echo "::error::$M ontbreekt in deze repo. Zie de README van de bouwlaag."; exit 1; }
+          python3 - "$M" >> "$GITHUB_OUTPUT" <<'PY'
+          import json, sys
+          m = json.load(open(sys.argv[1]))
+          for veld in ("project", "customer", "plan", "package"):
+              if not m.get(veld):
+                  sys.exit(f"manifest mist het veld '{veld}'")
+          b = m.get("build") or {}
+          for veld in ("command", "output"):
+              if not b.get(veld):
+                  sys.exit(f"manifest mist het veld 'build.{veld}'")
+          print(f"project={m['project']}")
+          print(f"customer={m['customer']}")
+          print(f"plan={m['plan']}")
+          print(f"package={m['package'].lower()}")
+          print(f"command={b['command']}")
+          print(f"output={b['output']}")
+          print(f"node={b.get('node', '22')}")
+          print(f"manager={b.get('manager', 'npm')}")
+          PY
+
+      - name: Het buildnummer
+        id: nummer
+        # Datum plus commit, doel 5. Geen volgnummer van GitHub: dat begint
+        # opnieuw als een repo verhuist, en bij DWY ligt het bij de klant.
+        run: echo "build=$(date -u +%Y%m%d-%H%M)-$(git rev-parse --short=7 HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: ${{ steps.manifest.outputs.node }}
+          cache: ${{ steps.manifest.outputs.manager }}
+
+      - name: Pakketten installeren
+        run: |
+          set -euo pipefail
+          case "${{ steps.manifest.outputs.manager }}" in
+            npm)  npm ci ;;
+            pnpm) corepack enable && pnpm install --frozen-lockfile ;;
+            yarn) corepack enable && yarn install --immutable ;;
+            *)    echo "::error::onbekende pakketmanager"; exit 1 ;;
+          esac
+
+      - name: Bouwen
+        run: ${{ steps.manifest.outputs.command }}
+
+      - name: De uitvoer keuren
+        # Doel 4. Weigeren op wat SEO of veiligheid breekt, waarschuwen op de
+        # rest. Dit kijkt naar wat er werkelijk uit de build kwam en raadt niets
+        # uit de broncode. Job 2 doet dit nog een keer.
+        run: python3 .notift/checks/check_output.py "${{ steps.manifest.outputs.output }}" "${{ inputs.manifest }}"
+
+      - name: Het resultaat doorgeven
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: site
+          path: ${{ steps.manifest.outputs.output }}
+          # Hier staat gebouwde code van een klant in. Zo kort mogelijk bewaren.
+          retention-days: 1
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------------------
+  # Job 2: hier draait geen code van de klant. Alleen hier ligt het token.
+  # ---------------------------------------------------------------------------
+  publiceren:
+    needs: bouwen
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      digest: ${{ steps.publiceren.outputs.digest }}
+
+    steps:
+      - name: De repo van het project
+        # Alleen voor het manifest, en met opzet vers in plaats van via het
+        # artefact. Wat door job 1 heen komt is aangeraakt door de klant.
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: De bouwlaag van Notift
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: notift/build
+          path: .notift
+          ref: v1
+
+      - name: Welke versie van de bouwlaag dit is
+        id: bouwlaag
+        # Doel 5 wil kunnen aantonen welke versie van de workflow een image
+        # mocht bouwen. `v1` is een tag van onszelf en die kunnen we verplaatsen,
+        # dus als label bewijst hij niets. Dit is de hash die werkelijk is
+        # uitgecheckt, en die kan niet meer bewegen.
+        run: echo "sha=$(git -C .notift rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Het resultaat ophalen
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: site
+          path: .notift-context/site
+
+      - name: De uitvoer opnieuw keuren
+        # Het artefact is de brug tussen twee jobs, en job 1 draaide vreemde
+        # code. Wat daar goedgekeurd is, hoeft niet te zijn wat hier aankomt.
+        run: python3 .notift/checks/check_output.py .notift-context/site "${{ inputs.manifest }}"
+
+      - name: Vooraf comprimeren
+        # Wat je zelf kunt oplossen, moet je niet aan de klant melden. nginx
+        # serveert deze bestanden kant-en-klaar, zie gzip_static in nginx.conf.
+        # Dit gebeurt hier en niet in job 1, zodat de keuring hierboven naar
+        # gewone bestanden kijkt en niet naar gecomprimeerde.
+        run: |
+          set -euo pipefail
+          find .notift-context/site \
+            \( -name '*.html' -o -name '*.css' -o -name '*.js' -o -name '*.svg' -o -name '*.json' \) \
+            -size +1k -exec gzip -9 -k -f {} \;
+
+      - name: Het gezondheidspad stempelen
+        # Doel 5 van de runtime-laag: de uitrol vraagt hier het buildnummer op en
+        # vergelijkt het met wat hij verwachtte. Zonder dit weet je niet met
+        # welke versie je praat. Het wordt hier gezet en niet in job 1, want de
+        # klant mag dit nummer niet kunnen schrijven.
+        run: printf '%s' "${{ needs.bouwen.outputs.build }}" > .notift-context/site/_health
+
+      - name: De bouwcontext klaarzetten
+        # De Dockerfile komt uit onze eigen repo en niet uit het artefact.
+        run: cp .notift/base/site.Dockerfile .notift-context/Dockerfile
+
+      - name: Inloggen bij ghcr.io
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Publiceren
+        id: publiceren
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: .notift-context
+          push: true
+          # Punt 8 van het contract: de machines zijn x86. Een image voor de
+          # verkeerde architectuur start niet, en dat wil je hier merken.
+          platforms: linux/amd64
+          tags: ${{ needs.bouwen.outputs.package }}:${{ needs.bouwen.outputs.build }}
+          build-args: |
+            BASE=ghcr.io/notift/static-base:1
+            BUILD=${{ needs.bouwen.outputs.build }}
+            PROJECT=${{ needs.bouwen.outputs.project }}
+            CUSTOMER=${{ needs.bouwen.outputs.customer }}
+            PLAN=${{ needs.bouwen.outputs.plan }}
+            COMMIT=${{ github.sha }}
+            REPO=${{ github.repository }}
+            WORKFLOW=notift/build@${{ steps.bouwlaag.outputs.sha }}
+
+      - name: Wat je hierna nodig hebt
+        run: |
+          {
+            echo "### Gepubliceerd"
+            echo ""
+            echo "| | |"
+            echo "|---|---|"
+            echo "| Build | \`${{ needs.bouwen.outputs.build }}\` |"
+            echo "| Digest | \`${{ steps.publiceren.outputs.digest }}\` |"
+            echo ""
+            echo "Uitrollen:"
+            echo ""
+            echo '```'
+            echo "sudo ./deploy.sh ${{ needs.bouwen.outputs.project }} ${{ needs.bouwen.outputs.package }}@${{ steps.publiceren.outputs.digest }}"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

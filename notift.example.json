@@ -1,0 +1,22 @@
+{
+  "$commentaar": "Het manifest van een project. Dit bestand heet notift.json en staat in de repo van het project zelf, niet hier. Doel 7 van docs/07-bouwlaag.md.",
+
+  "project": "prj_00042",
+  "customer": "cus_00007",
+  "plan": "websites-1",
+  "package": "ghcr.io/notift/prj_00042",
+
+  "build": {
+    "$commentaar": "Wat de build moet doen. De bouwlaag raadt niets: dit staat hier, en de uitvoer wordt daarna gekeurd.",
+    "command": "npm run build",
+    "output": "dist",
+    "node": "22",
+    "manager": "npm"
+  },
+
+  "$commentaar_searchable": "Moet deze site door Google gevonden worden? Standaard ja. Op ja weigert de build een lege schil zonder tekst. Zet dit alleen op false voor een dashboard achter een login.",
+  "searchable": true,
+
+  "$commentaar_keys": "Sleutels die legitiem in de gebouwde bestanden mogen staan, exact en per stuk. Geen brede uitzondering op 'alles wat op een publieke sleutel lijkt', want dan is de hele controle waardeloos. Een sk_-sleutel of een service_role-sleutel faalt altijd.",
+  "allowed_public_keys": []
+}
