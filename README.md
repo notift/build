@@ -140,15 +140,24 @@ alles.
 |---|---|---|
 | 1 | ~~Een repo `notift/build` aanmaken met een tag `v1`~~ **Gedaan 2026-09-04.** **Publiek**, want een projectrepo kan een prive workflow-repo niet uitchecken. `v1` staat en publiceren gaat met `release.sh`. **Er komt nooit iets in deze repo dat niet openbaar mag zijn** | GitHub |
 | 2 | ~~Elke `uses:` vastzetten op een commit-hash~~ **Gedaan 2026-09-04.** Alle vier de actions staan vast op een hash, met de versie als commentaar erachter. Meteen ook naar de actuele hoofdversie, want alle vier stonden een major achter en draaien nu op node24. Nagekeken dat elke invoerwaarde die wij gebruiken daar nog bestaat | `workflow/build-and-publish.yml` |
-| 3 | ~~Het basisimage publiceren~~ **Gedaan 2026-09-04.** `ghcr.io/notift/static-base:1`, digest `sha256:753cf21b`. Nagemeten op het gepubliceerde image: geen root, poort 8080, en `/_health` antwoordde vanuit een alleen-lezen container | Eenmalig |
-| 4 | Het account `notift-deploy` leesrecht geven op het pakket, en een klassiek token met alleen `read:packages` op `web-01` zetten. Het account bestaat. **Let op: `notift` is een gebruikersaccount en geen organisatie**, dus dat gaat per pakket. Zie doel 3 in `docs/07-bouwlaag.md` | GitHub plus de machine |
-| 5 | Per project een `notift.json` en een workflow van drie regels die de onze aanroept | Per klant |
+| 3 | ~~Het basisimage publiceren~~ **Gedaan 2026-09-04.** Staat nu op **versie 2**, digest `sha256:f6293bb9`. Nagemeten op het gepubliceerde image: geen root, poort 8080, `/_health` antwoordt vanuit een alleen-lezen container, en een niet-bestaande pagina geeft 404 en geen 200 | Eenmalig |
+| 4 | ~~Het deployeraccount en het token~~ **Gedaan 2026-09-04.** `notift-deploy` heeft Read op `prj_00001`, en het token staat in `/root/.docker/config.json` op `web-01`. **Het verloopt op 2026-12-03.** Per nieuw project moet stap 2 en 3 van de procedure in doel 3 opnieuw | GitHub plus de machine |
+| 5 | Per project een `notift.json` en een workflow van drie regels die de onze aanroept. Zie `notift/testsite` als voorbeeld dat werkt | Per klant |
 
 Punt 4 is een bewuste keuze en geen gemak: zie doel 3 in `docs/07-bouwlaag.md`, met de reden en de
 trigger om het later strakker te zetten.
 
 ## Wat hier nog niet staat
 
-Opruimen van oude versies op `ghcr.io` en het intrekken bij vertrek, doel 8. En de proef op de
-echte keten: een push die tot een draaiende site leidt. Dat is de volgende stap, en die vraagt
-GitHub-toegang.
+**Opruimen van oude versies op `ghcr.io` en het intrekken bij vertrek, doel 8.** Elke build laat een
+versie achter in het pakket, en niets ruimt die op. Bij een site die vaak publiceert groeit dat door.
+
+**Uitrollen zonder serverlogin.** Dat is de aansturingslaag, niet deze laag. De workflow print aan
+het eind een commando dat iemand met de hand uitvoert.
+
+**Een build voor een klant zonder `package.json`.** De workflow draait altijd `setup-node` en
+`npm ci`, dus kant-en-klare HTML zonder afhankelijkheden komt er nu niet doorheen. Doel 2 zegt dat
+zo'n klant erbij hoort, dus dit is een gat en geen keuze.
+
+De proef op de echte keten is **gedaan** op 4 september 2026, met `notift/testsite`. Zie
+"Wat de eerste proef moet aantonen" in `docs/07-bouwlaag.md`.
