@@ -232,7 +232,12 @@ jobs:
           platforms: linux/amd64
           tags: ${{ needs.bouwen.outputs.package }}:${{ needs.bouwen.outputs.build }}
           build-args: |
-            BASE=ghcr.io/notift/static-base:1
+            # Op de digest en niet op de tag `:1`, om dezelfde reden waarom
+            # deploy.sh alleen een digest accepteert: een tag kan verplaatsen,
+            # en dan levert een herbouw van dezelfde klantcode stilletjes een
+            # andere webserver op. Een nieuw basisimage bereikt een klant pas
+            # als deze regel bewust bijgewerkt wordt.
+            BASE=ghcr.io/notift/static-base@sha256:753cf21b6f20d2203b2f7903d0809d0c2f60a96ad5aa59691cf7952ec29db970
             BUILD=${{ needs.bouwen.outputs.build }}
             PROJECT=${{ needs.bouwen.outputs.project }}
             CUSTOMER=${{ needs.bouwen.outputs.customer }}
