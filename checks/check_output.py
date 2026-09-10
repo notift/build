@@ -58,6 +58,11 @@ GEHEIMEN = [
 
 JWT = re.compile(rb"\beyJ[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}")
 
+# Dit is bewust een korte, expliciete lijst. Een klant beheert zijn manifest en
+# mag daarmee dus nooit een uitzondering maken voor een geheim. Voeg later een
+# type toe aan deze verzameling, niet een extra uitzondering in een scanlus.
+TOEGESTANE_PUBLIEKE_SLEUTELTYPEN = {"supabase_anon_key"}
+
 
 class Bevindingen:
     def __init__(self):
@@ -141,6 +146,41 @@ def lees_manifest(pad):
             sys.exit(f"manifest mist het veld 'build.{veld}': {pad}")
     m.setdefault("searchable", True)
     m.setdefault("allowed_public_keys", [])
+    if not isinstance(m["allowed_public_keys"], list):
+        sys.exit("manifestveld 'allowed_public_keys' moet een lijst zijn")
+    for nummer, sleutel in enumerate(m["allowed_public_keys"], start=1):
+        waar = f"allowed_public_keys[{nummer}]"
+        if not isinstance(sleutel, dict):
+            sys.exit(f"manifestveld '{waar}' moet een object zijn")
+        sleuteltype = sleutel.get("type")
+        waarde = sleutel.get("value")
+        if not isinstance(sleuteltype, str) or not sleuteltype:
+            sys.exit(f"manifestveld '{waar}.type' ontbreekt")
+        if not isinstance(waarde, str) or not waarde:
+            sys.exit(f"manifestveld '{waar}.value' ontbreekt")
+        if sleuteltype not in TOEGESTANE_PUBLIEKE_SLEUTELTYPEN:
+            sys.exit(
+                f"manifestveld '{waar}' gebruikt verboden sleuteltype "
+                f"'{sleuteltype}': alleen een publiek toegestane sleutel mag "
+                "op de uitzonderingenlijst; geheimen falen altijd"
+            )
+
+        # Het type is geen etiket dat de klant zelf mag kiezen. Controleer de
+        # waarde bij het lezen, zodat een service_role-sleutel niet eerst in een
+        # uitvoermap hoeft te belanden voordat de fout zichtbaar wordt.
+        rol = jwt_rol(waarde)
+        if rol is None:
+            sys.exit(
+                f"manifestveld '{waar}' heeft type '{sleuteltype}', maar de "
+                "waarde is geen leesbare JWT met een rol"
+            )
+        werkelijk_type = jwt_type(rol)
+        if werkelijk_type != sleuteltype:
+            sys.exit(
+                f"manifestveld '{waar}' zegt type '{sleuteltype}', maar de "
+                f"waarde is {werkelijk_type}: een service_role- of andere "
+                "niet-publieke sleutel mag nooit op de uitzonderingenlijst"
+            )
     return m
 
 
@@ -169,27 +209,30 @@ def controleer_geheimen(root, toegestaan, b):
             continue
 
         for wat, patroon in GEHEIMEN:
-            for treffer in patroon.findall(inhoud):
-                waarde = treffer if isinstance(treffer, bytes) else b""
-                if waarde.decode("utf-8", "ignore") in toegestane_waarden:
-                    continue
+            for treffer in patroon.finditer(inhoud):
+                # Deze vormen zijn allemaal geheimen. De oude vorm keek eerst
+                # naar de uitzonderingenlijst, waardoor een sk_-sleutel daarin
+                # onzichtbaar werd. Een manifest mag die grens nooit verleggen.
                 b.weiger(f"{wat} gevonden", rel)
                 break
 
-        # Een JWT met de rol service_role is nooit publiek bedoeld. Een anon key
-        # kan legitiem zijn, maar alleen als hij in het manifest staat.
+        # Een JWT moet eerst leesbaar en publiek blijken voordat de uitzondering
+        # telt. De oude volgorde deed het omgekeerde: een waarde in het manifest
+        # sloeg de rolcontrole over en kon zo een service_role-sleutel toelaten.
         for treffer in JWT.findall(inhoud):
             tekst = treffer.decode("utf-8", "ignore")
-            if tekst in toegestane_waarden:
-                continue
             rol = jwt_rol(tekst)
-            if rol == "service_role":
+            if rol is None:
+                b.weiger("een JWT waarvan de rol niet leesbaar is staat in de uitvoer", rel)
+            elif rol == "service_role":
                 b.weiger("een service_role-sleutel staat in de uitvoer", rel)
-            elif rol:
+            elif jwt_type(rol) not in TOEGESTANE_PUBLIEKE_SLEUTELTYPEN:
                 b.weiger(
-                    f"een sleutel met rol '{rol}' staat in de uitvoer en niet in het manifest",
+                    f"een sleutel met rol '{rol}' staat in de uitvoer; die rol mag nooit publiek zijn",
                     rel,
                 )
+            elif tekst not in toegestane_waarden:
+                b.weiger("een publieke sleutel staat in de uitvoer en niet in het manifest", rel)
 
 
 def jwt_rol(token):
@@ -197,9 +240,19 @@ def jwt_rol(token):
         payload = token.split(".")[1]
         payload += "=" * (-len(payload) % 4)
         data = json.loads(base64.urlsafe_b64decode(payload))
-        return str(data.get("role", "")) or ""
+        rol = data.get("role")
+        return str(rol) if isinstance(rol, str) and rol else None
     except Exception:
-        return ""
+        return None
+
+
+def jwt_type(rol):
+    """Het type dat de waarde werkelijk heeft, niet wat het manifest beweert."""
+    if rol == "anon":
+        return "supabase_anon_key"
+    if rol == "service_role":
+        return "supabase_service_role_key"
+    return f"JWT met rol '{rol}'"
 
 
 def controleer_html(root, doorzoekbaar, b):

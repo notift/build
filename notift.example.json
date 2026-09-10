@@ -17,6 +17,6 @@
   "$commentaar_searchable": "Moet deze site door Google gevonden worden? Standaard ja. Op ja weigert de build een lege schil zonder tekst. Zet dit alleen op false voor een dashboard achter een login.",
   "searchable": true,
 
-  "$commentaar_keys": "Sleutels die legitiem in de gebouwde bestanden mogen staan, exact en per stuk. Geen brede uitzondering op 'alles wat op een publieke sleutel lijkt', want dan is de hele controle waardeloos. Een sk_-sleutel of een service_role-sleutel faalt altijd.",
+  "$commentaar_keys": "Sleutels die legitiem in de gebouwde bestanden mogen staan, exact en per stuk. Vandaag is alleen type supabase_anon_key toegestaan; de controle leest de JWT en eist werkelijk de rol anon. Geen brede uitzondering op 'alles wat op een publieke sleutel lijkt', want dan is de hele controle waardeloos. Een sk_-sleutel of een service_role-sleutel faalt altijd, ook als hij hier wordt ingevuld.",
   "allowed_public_keys": []
 }

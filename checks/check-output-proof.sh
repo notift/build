@@ -30,11 +30,11 @@ import base64, json
 def d(o): return base64.urlsafe_b64encode(json.dumps(o).encode()).decode().rstrip("=")
 print(d({"alg":"HS256"}) + "." + d({"role":"service_role","iss":"supabase"}) + ".handtekeningXYZ123")')"
 
-# manifest <naam> <doorzoekbaar> [toegestane sleutel]
+# manifest <naam> <doorzoekbaar> [toegestane sleutel] [type]
 manifest() {
-  local naam="$1" zoek="$2" sleutel="${3:-}"
+  local naam="$1" zoek="$2" sleutel="${3:-}" type="${4:-supabase_anon_key}"
   local keys="[]"
-  [ -n "$sleutel" ] && keys="[{\"type\": \"supabase_anon_key\", \"value\": \"$sleutel\"}]"
+  [ -n "$sleutel" ] && keys="[{\"type\": \"$type\", \"value\": \"$sleutel\"}]"
   cat > "$WORK/$naam.json" <<JSON
 {
   "project": "prj_proof",
@@ -91,6 +91,10 @@ printf '\n%s== Het bewijs van doel 4: wat weigert en wat waarschuwt ==%s\n\n' "$
 manifest gewoon true
 manifest dashboard false
 manifest metsleutel true "$ANON"
+manifest metservice true "$SERVICE"
+manifest metstripe true "sk_live_51H8xQ2eZvKYlo2CabcdefghijK" stripe_secret_key
+manifest verkeerdtype true "$SERVICE"
+ONLEESBAAR="eyJhbGciOiJIUzI1NiJ9.geen-geldige-json-inhoud.handtekeningXYZ123"
 
 # 0. De toets moet iets kunnen zien.
 goede_site "$WORK/goed"
@@ -165,6 +169,24 @@ for w in "afbeelding van" "bronkaart" "bestaat niet"; do
     *) bad "geen waarschuwing over: $w" ;;
   esac
 done
+
+# 13-17. De uitzondering is alleen voor een werkelijk publieke anon key. Deze
+# gevallen horen bij elkaar: vroeger werden a en b stil overgeslagen zodra hun
+# waarde in het manifest stond, nog voor de rol of het geheime patroon telde.
+cp -R "$WORK/goed" "$WORK/serviceoplijst"
+printf 'const s = "%s";' "$SERVICE" > "$WORK/serviceoplijst/db.js"
+verwacht weigeren "een service_role-sleutel, ook op de uitzonderingenlijst" "$WORK/serviceoplijst" metservice
+
+cp -R "$WORK/goed" "$WORK/stripeoplijst"
+printf 'const s = "sk_live_51H8xQ2eZvKYlo2CabcdefghijK";' > "$WORK/stripeoplijst/betalen.js"
+verwacht weigeren "een sk_-sleutel, ook op de uitzonderingenlijst" "$WORK/stripeoplijst" metstripe
+
+verwacht weigeren "een service_role-waarde die zich als anon key voordoet" "$WORK/metanon" verkeerdtype
+verwacht toelaten "een anon key met het juiste type en de juiste waarde" "$WORK/metanon" metsleutel
+
+cp -R "$WORK/goed" "$WORK/metonleesbarejwt"
+printf 'const s = "%s";' "$ONLEESBAAR" > "$WORK/metonleesbarejwt/db.js"
+verwacht weigeren "een JWT waarvan de rol niet leesbaar is" "$WORK/metonleesbarejwt" gewoon
 
 printf '\n'
 if [ "$FAILED" -ne 0 ]; then

@@ -22,6 +22,7 @@ build wordt weggegooid. Wat hij aflevert is een image op `ghcr.io` dat het artef
 | `base/site.Dockerfile` | Het image van een site: het basisimage plus de gebouwde map, met de labels |
 | `checks/check_output.py` | Doel 4: keurt de uitvoer van de build. Weigert of waarschuwt |
 | `checks/check-output-proof.sh` | Het bewijs dat die controle werkelijk weigert. Draait op de Mac |
+| `checks/check-private-image-proof.sh` | Tegenproef voor doel 3: publiek rood en privaat groen op dezelfde meting |
 | `workflow/build-and-publish.yml` | De herbruikbare workflow die elk project aanroept. Twee jobs, en dat is een grens |
 | `workflow/base-image.yml` | Het basisimage bouwen en publiceren. Met de hand te starten, niet vanzelf |
 | `notift.example.json` | Het manifest dat in de repo van een project komt |
@@ -29,7 +30,8 @@ build wordt weggegooid. Wat hij aflevert is een image op `ghcr.io` dat het artef
 | `verify.sh` | De stand bij GitHub, afleesbaar zonder door instellingenpagina's te klikken |
 
 ```
-./checks/check-output-proof.sh                       zestien gevallen, weigeren en waarschuwen
+./checks/check-output-proof.sh                       eenentwintig gevallen, weigeren en waarschuwen
+./checks/check-private-image-proof.sh                publieke en private tegenproef voor de afschermingsmeting
 python3 checks/check_output.py dist notift.json      een echte uitvoer keuren
 ./release.sh                                         tonen wat er naar notift/build zou gaan
 ./release.sh --push v1                               publiceren en de tag verplaatsen
@@ -48,6 +50,14 @@ stil verkeerd, en geen ervan was zichtbaar in de code hier:
 | 1 | Het deployeraccount had **schrijfrecht** op deze repo in plaats van leesrecht |
 | 2 | `access_level` stond op `none`, dus geen enkele repo mocht de workflow aanroepen |
 | 3 | De repo was prive, waardoor een projectrepo hem niet kon uitchecken |
+
+En bij de overstap naar de organisatie, diezelfde dag, nog drie:
+
+| | Wat er stil fout stond |
+|---|---|
+| 4 | De oude pakketten **hielden de pakketnaam bezet**, en de organisatie mocht er niet op publiceren |
+| 5 | Een nieuw pakket onder een organisatie staat op **prive**. De build werd groen en het gat bleef |
+| 6 | De standaardrechten van de organisatie stonden op **read**, dus een lid zag elke repo |
 
 Alle drie geven nu rood. Wat het script **niet** nakijkt staat onderaan zijn eigen uitvoer, want een
 controle die zwijgt over wat hij niet ziet is de gevaarlijkste soort.
@@ -134,6 +144,26 @@ anders kunnen zijn dan een sleutel.
 **Wat deze controle nooit kan:** bewijzen dat er geen geheim in zit. Hij vindt bekende vormen, niet
 alles.
 
+De uitzonderingenlijst kent vandaag alleen `supabase_anon_key`: de waarde moet een leesbare JWT met
+rol `anon` zijn. Een ander opgegeven type, een verkeerd type bij de waarde, een onleesbare JWT, een
+`sk_`-sleutel of een `service_role`-sleutel faalt al bij het lezen van het manifest. De lijst is
+geen manier om een geheim alsnog goed te keuren.
+
+Bij `./verify.sh prj_...` meet de projectcontrole in zes afzonderlijke regels: bestaat het
+containerpakket, noemt GitHub het private, is er een bestaande digest, kan de ingelogde weg die
+digest ophalen, weigert de anonieme weg diezelfde digest, en kwam er werkelijk een HTTP-antwoord.
+De oude controle vroeg `latest` op, terwijl de workflow alleen buildnummers en digests publiceert.
+Een publiek pakket zonder tag `latest` gaf daardoor 404 en ten onrechte groen. Een onbekend pakket,
+lege versielijst of netwerkfout is nu een fout, nooit bewijs van afscherming.
+
+`check-private-image-proof.sh` draait diezelfde zes metingen aan beide kanten. Op het bestaande
+publieke containerpakket `notift/static-base` horen stappen 2 en 5 rood te zijn: GitHub zegt
+`public` en de anonieme aanvraag van een bestaande digest krijgt HTTP 200. Op `prj_00001` horen
+stappen 1 tot en met 6 groen te zijn; GHCR weigert daar al bij het tokenpunt met geldige
+`UNAUTHORIZED`-JSON. Beide uitkomsten bewijzen iets anders en samen tonen ze dat de controle
+publiek werkelijk afkeurt én privaat werkelijk kan goedkeuren. De proef verandert niets bij GitHub
+en stopt met een fout als `gh` niet beschikbaar of niet ingelogd is.
+
 ## Wat Leon nog moet doen voordat dit voor het eerst draait
 
 | | Wat | Waar |
@@ -141,7 +171,7 @@ alles.
 | 1 | ~~Een repo `notift/build` aanmaken met een tag `v1`~~ **Gedaan 2026-09-04.** **Publiek**, want een projectrepo kan een prive workflow-repo niet uitchecken. `v1` staat en publiceren gaat met `release.sh`. **Er komt nooit iets in deze repo dat niet openbaar mag zijn** | GitHub |
 | 2 | ~~Elke `uses:` vastzetten op een commit-hash~~ **Gedaan 2026-09-04.** Alle vier de actions staan vast op een hash, met de versie als commentaar erachter. Meteen ook naar de actuele hoofdversie, want alle vier stonden een major achter en draaien nu op node24. Nagekeken dat elke invoerwaarde die wij gebruiken daar nog bestaat | `workflow/build-and-publish.yml` |
 | 3 | ~~Het basisimage publiceren~~ **Gedaan 2026-09-04.** Staat nu op **versie 3**, digest `sha256:31bcdc43`, en dat is de eerste versie die werkelijk van de organisatie is. Versie 1 en 2 zijn weg: die hoorden bij het gebruikersaccount en hielden de naam bezet. Nagemeten op het gepubliceerde image: geen root, poort 8080, `/_health` antwoordt vanuit een alleen-lezen container, en een niet-bestaande pagina geeft 404 en geen 200 | Eenmalig |
-| 4 | ~~Het deployeraccount en het token~~ **Gedaan 2026-09-04.** `notift-deploy` heeft Read op `prj_00001`, en het token staat in `/root/.docker/config.json` op `web-01`. **Het verloopt op 2026-12-03.** Per nieuw project moet stap 2 en 3 van de procedure in doel 3 opnieuw | GitHub plus de machine |
+| 4 | ~~Het deployeraccount en het token~~ **Gedaan 2026-09-04.** `notift-deploy` is **lid van de organisatie** met Read op het pakket `prj_00001`. Lid worden was nodig omdat een organisatie pakkettoegang alleen aan leden en teams geeft. Het kan alleen veilig doordat de standaardrechten van de organisatie op `none` staan, anders had dit account leesrecht op elke repo gekregen. Het token staat in `/root/.docker/config.json` op `web-01` en **verloopt op 2026-12-03**. Per nieuw project moet de pakkettoegang opnieuw gegeven worden, en daar is geen API voor | GitHub plus de machine |
 | 5 | Per project een `notift.json` en een workflow van drie regels die de onze aanroept. Zie `notift/testsite` als voorbeeld dat werkt | Per klant |
 
 Punt 4 is een bewuste keuze en geen gemak: zie doel 3 in `docs/07-bouwlaag.md`, met de reden en de
