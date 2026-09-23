@@ -138,7 +138,9 @@ class Pagina(HTMLParser):
 def lees_manifest(pad):
     with open(pad, "r", encoding="utf-8") as f:
         m = json.load(f)
-    for veld in ("project", "customer", "plan", "package", "build"):
+    if "customer" in m:
+        sys.exit("manifestveld 'customer' is vervallen; gebruik organisation, project en module")
+    for veld in ("organisation", "project", "module", "plan", "package", "build"):
         if not m.get(veld):
             sys.exit(f"manifest mist het veld '{veld}': {pad}")
     for veld in ("command", "output"):
@@ -181,6 +183,17 @@ def lees_manifest(pad):
                 f"waarde is {werkelijk_type}: een service_role- of andere "
                 "niet-publieke sleutel mag nooit op de uitzonderingenlijst"
             )
+    vormen = {
+        "organisation": r"^org_[0-9]{5}$",
+        "project": r"^prj_[0-9]{5}$",
+        "module": r"^mod_[0-9]{5}$",
+    }
+    for veld, patroon in vormen.items():
+        if not re.fullmatch(patroon, m[veld]):
+            sys.exit(f"manifestveld '{veld}' heeft ongeldige vorm: {m[veld]}")
+    verwacht_pakket = f"ghcr.io/notift/{m['module']}"
+    if m["package"] != verwacht_pakket:
+        sys.exit(f"manifestveld 'package' moet exact '{verwacht_pakket}' zijn, niet '{m['package']}'")
     return m
 
 

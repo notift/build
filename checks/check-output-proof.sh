@@ -37,10 +37,11 @@ manifest() {
   [ -n "$sleutel" ] && keys="[{\"type\": \"$type\", \"value\": \"$sleutel\"}]"
   cat > "$WORK/$naam.json" <<JSON
 {
-  "project": "prj_proof",
-  "customer": "cus_proof",
+  "organisation": "org_99001",
+  "project": "prj_99001",
+  "module": "mod_99001",
   "plan": "websites-1",
-  "package": "ghcr.io/notift/prj_proof",
+  "package": "ghcr.io/notift/mod_99001",
   "build": { "command": "npm run build", "output": "dist", "node": "22", "manager": "npm" },
   "searchable": $zoek,
   "allowed_public_keys": $keys
@@ -94,11 +95,15 @@ manifest metsleutel true "$ANON"
 manifest metservice true "$SERVICE"
 manifest metstripe true "sk_live_51H8xQ2eZvKYlo2CabcdefghijK" stripe_secret_key
 manifest verkeerdtype true "$SERVICE"
+cat > "$WORK/oude-customer.json" <<'JSON'
+{"organisation":"org_99001","project":"prj_99001","module":"mod_99001","customer":"cus_00001","plan":"websites-1","package":"ghcr.io/notift/mod_99001","build":{"command":"npm run build","output":"dist"}}
+JSON
 ONLEESBAAR="eyJhbGciOiJIUzI1NiJ9.geen-geldige-json-inhoud.handtekeningXYZ123"
 
 # 0. De toets moet iets kunnen zien.
 goede_site "$WORK/goed"
 verwacht toelaten "een gewone site met tekst, titel en taal" "$WORK/goed" gewoon
+verwacht weigeren "een oud customer-veld in het manifest" "$WORK/goed" oude-customer
 
 # 1. Een schil zonder inhoud.
 mkdir -p "$WORK/schil"

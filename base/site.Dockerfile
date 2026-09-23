@@ -8,8 +8,9 @@ ARG BASE
 FROM ${BASE}
 
 ARG BUILD
+ARG ORGANISATION
 ARG PROJECT
-ARG CUSTOMER
+ARG MODULE
 ARG PLAN
 ARG COMMIT
 ARG REPO
@@ -17,11 +18,13 @@ ARG WORKFLOW
 
 COPY site/ /usr/share/nginx/html/
 
-# Punt 3 van het artefactcontract: klant, project, plan, versie en de commit.
+# Punt 3 van het artefactcontract: organisatie, project, module, plan, versie
+# en de commit.
 # De laatste twee zijn de herkomst uit doel 1 van de bouwlaag: welke repo en
 # welke versie van de workflow dit image mocht maken.
-LABEL nl.notift.customer="$CUSTOMER" \
+LABEL nl.notift.organisation="$ORGANISATION" \
       nl.notift.project="$PROJECT" \
+      nl.notift.module="$MODULE" \
       nl.notift.plan="$PLAN" \
       nl.notift.version="$BUILD" \
       nl.notift.commit="$COMMIT" \

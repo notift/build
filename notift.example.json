@@ -1,10 +1,11 @@
 {
   "$commentaar": "Het manifest van een project. Dit bestand heet notift.json en staat in de repo van het project zelf, niet hier. Doel 7 van docs/07-bouwlaag.md.",
 
+  "organisation": "org_00007",
   "project": "prj_00042",
-  "customer": "cus_00007",
+  "module": "mod_00007",
   "plan": "websites-1",
-  "package": "ghcr.io/notift/prj_00042",
+  "package": "ghcr.io/notift/mod_00007",
 
   "build": {
     "$commentaar": "Wat de build moet doen. De bouwlaag raadt niets: dit staat hier, en de uitvoer wordt daarna gekeurd.",

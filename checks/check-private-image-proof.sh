@@ -2,7 +2,7 @@
 # Tegenproef voor de afschermingsmeting in ../verify.sh.
 #
 # static-base is met opzet een bestaand, publiek CONTAINERpakket van Notift;
-# prj_00001 is het private tegenbeeld. Deze proef verandert niets bij GitHub,
+# mod_00002 is het private tegenbeeld. Deze proef verandert niets bij GitHub,
 # maar bewijst beide kanten van dezelfde meting: publiek moet rood, privaat
 # moet op alle zes projectstappen groen zijn.
 # Een apart script is hier helderder dan een geval in check-output-proof.sh:
@@ -62,10 +62,10 @@ esac
 printf '\n  %sDe controle kan een publiek containerpakket zien en afkeuren.%s\n\n' "$C_OK" "$C_OFF"
 
 printf '%s== Tegenproef: een privaat image komt wel door de privecontrole ==%s\n\n' "$C_BOLD" "$C_OFF"
-PRIVATE_UIT="$("$VERIFY" prj_00001 2>&1)"; PRIVATE_RC=$?
+PRIVATE_UIT="$("$VERIFY" mod_00002 2>&1)"; PRIVATE_RC=$?
 
 eis "$PRIVATE_UIT" "stap 1 ziet het private klantpakket" "ok   1. klantpakket bestaat"
-eis "$PRIVATE_UIT" "stap 2 is groen: GitHub noemt prj_00001 private" "ok   2. GitHub noemt het pakket private"
+eis "$PRIVATE_UIT" "stap 2 is groen: GitHub noemt mod_00002 private" "ok   2. GitHub noemt het pakket private"
 eis "$PRIVATE_UIT" "stap 3 vindt een bestaande private digest" "ok   3. bestaande digest uit pakketversies"
 eis "$PRIVATE_UIT" "stap 4 haalt de private digest ingelogd op" "ok   4. digest met inloggegevens ophalen"
 eis "$PRIVATE_UIT" "stap 5 is groen: tokenpunt weigert de buitenstaander" "ok   5. dezelfde digest anoniem ophalen"

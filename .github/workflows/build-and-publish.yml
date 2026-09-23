@@ -66,8 +66,9 @@ jobs:
       contents: read
     outputs:
       build: ${{ steps.nummer.outputs.build }}
+      organisation: ${{ steps.manifest.outputs.organisation }}
       project: ${{ steps.manifest.outputs.project }}
-      customer: ${{ steps.manifest.outputs.customer }}
+      module: ${{ steps.manifest.outputs.module }}
       plan: ${{ steps.manifest.outputs.plan }}
       package: ${{ steps.manifest.outputs.package }}
 
@@ -91,15 +92,25 @@ jobs:
           python3 - "$M" >> "$GITHUB_OUTPUT" <<'PY'
           import json, sys
           m = json.load(open(sys.argv[1]))
-          for veld in ("project", "customer", "plan", "package"):
+          if "customer" in m:
+              sys.exit("manifestveld 'customer' is vervallen; gebruik organisation, project en module")
+          for veld in ("organisation", "project", "module", "plan", "package"):
               if not m.get(veld):
                   sys.exit(f"manifest mist het veld '{veld}'")
+          import re
+          for veld, patroon in (("organisation", r"^org_[0-9]{5}$"), ("project", r"^prj_[0-9]{5}$"), ("module", r"^mod_[0-9]{5}$")):
+              if not re.fullmatch(patroon, m[veld]):
+                  sys.exit(f"manifestveld '{veld}' heeft ongeldige vorm: {m[veld]}")
+          verwacht_pakket = f"ghcr.io/notift/{m['module']}"
+          if m["package"] != verwacht_pakket:
+              sys.exit(f"manifestveld 'package' moet exact '{verwacht_pakket}' zijn, niet '{m['package']}'")
           b = m.get("build") or {}
           for veld in ("command", "output"):
               if not b.get(veld):
                   sys.exit(f"manifest mist het veld 'build.{veld}'")
+          print(f"organisation={m['organisation']}")
           print(f"project={m['project']}")
-          print(f"customer={m['customer']}")
+          print(f"module={m['module']}")
           print(f"plan={m['plan']}")
           print(f"package={m['package'].lower()}")
           print(f"command={b['command']}")
@@ -243,8 +254,9 @@ jobs:
           build-args: |
             BASE=ghcr.io/notift/static-base@sha256:31bcdc43ae6443a40c1d44c281e45e0fcdec55eec8e9f72fb66bc038a1764c21
             BUILD=${{ needs.bouwen.outputs.build }}
+            ORGANISATION=${{ needs.bouwen.outputs.organisation }}
             PROJECT=${{ needs.bouwen.outputs.project }}
-            CUSTOMER=${{ needs.bouwen.outputs.customer }}
+            MODULE=${{ needs.bouwen.outputs.module }}
             PLAN=${{ needs.bouwen.outputs.plan }}
             COMMIT=${{ github.sha }}
             REPO=${{ github.repository }}
@@ -263,6 +275,6 @@ jobs:
             echo "Uitrollen:"
             echo ""
             echo '```'
-            echo "sudo ./deploy.sh ${{ needs.bouwen.outputs.project }} ${{ needs.bouwen.outputs.package }}@${{ steps.publiceren.outputs.digest }}"
+            echo "sudo ./deploy.sh ${{ needs.bouwen.outputs.module }} ${{ needs.bouwen.outputs.package }}@${{ steps.publiceren.outputs.digest }}"
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"

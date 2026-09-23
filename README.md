@@ -36,7 +36,7 @@ python3 checks/check_output.py dist notift.json      een echte uitvoer keuren
 ./release.sh                                         tonen wat er naar notift/build zou gaan
 ./release.sh --push v1                               publiceren en de tag verplaatsen
 ./verify.sh                                          de stand bij GitHub
-./verify.sh prj_00001                                en dat project erbij
+./verify.sh mod_00002                                en die module erbij
 ```
 
 ## Waarom er een `verify.sh` is voor deze laag
@@ -149,7 +149,7 @@ rol `anon` zijn. Een ander opgegeven type, een verkeerd type bij de waarde, een 
 `sk_`-sleutel of een `service_role`-sleutel faalt al bij het lezen van het manifest. De lijst is
 geen manier om een geheim alsnog goed te keuren.
 
-Bij `./verify.sh prj_...` meet de projectcontrole in zes afzonderlijke regels: bestaat het
+Bij `./verify.sh mod_...` meet de modulecontrole in zes afzonderlijke regels: bestaat het
 containerpakket, noemt GitHub het private, is er een bestaande digest, kan de ingelogde weg die
 digest ophalen, weigert de anonieme weg diezelfde digest, en kwam er werkelijk een HTTP-antwoord.
 De oude controle vroeg `latest` op, terwijl de workflow alleen buildnummers en digests publiceert.
@@ -158,7 +158,7 @@ lege versielijst of netwerkfout is nu een fout, nooit bewijs van afscherming.
 
 `check-private-image-proof.sh` draait diezelfde zes metingen aan beide kanten. Op het bestaande
 publieke containerpakket `notift/static-base` horen stappen 2 en 5 rood te zijn: GitHub zegt
-`public` en de anonieme aanvraag van een bestaande digest krijgt HTTP 200. Op `prj_00001` horen
+`public` en de anonieme aanvraag van een bestaande digest krijgt HTTP 200. Op `mod_00002` horen
 stappen 1 tot en met 6 groen te zijn; GHCR weigert daar al bij het tokenpunt met geldige
 `UNAUTHORIZED`-JSON. Beide uitkomsten bewijzen iets anders en samen tonen ze dat de controle
 publiek werkelijk afkeurt én privaat werkelijk kan goedkeuren. De proef verandert niets bij GitHub
