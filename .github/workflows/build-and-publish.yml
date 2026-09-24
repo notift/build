@@ -252,7 +252,7 @@ jobs:
           # hierboven, want daarbinnen wordt het als een parameter meegegeven.
           # Dat is een keer gebeurd en het viel pas op in de log van een run.
           build-args: |
-            BASE=ghcr.io/notift/static-base@sha256:a36a47e559baabedfcf3baf84026900f3362e1f8a9b1d8afd7eddfd47a6cfa57
+            BASE=ghcr.io/notift/static-base@sha256:2cc3dd81d56e7190a8737ff29e9aa4ec7abf4ab8f2b86e625c636fbd6cb26bb9
             BUILD=${{ needs.bouwen.outputs.build }}
             ORGANISATION=${{ needs.bouwen.outputs.organisation }}
             PROJECT=${{ needs.bouwen.outputs.project }}
