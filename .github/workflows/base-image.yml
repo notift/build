@@ -113,6 +113,10 @@ jobs:
               echo "::error::$pad geeft '$werkelijk', verwacht '$code $plek'"; fout=1
             fi
           }
+          # De homepagina eerst: die liep in versie 4 in een lus naar zichzelf,
+          # en de proef testte haar niet (24 september 2026).
+          verwacht /                     200 ""
+          verwacht "/?a=1"               200 ""
           verwacht /contact              200 ""
           verwacht /contact/             301 /contact
           verwacht "/contact/?a=1"       301 "/contact?a=1"
