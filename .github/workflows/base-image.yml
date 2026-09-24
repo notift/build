@@ -86,6 +86,45 @@ jobs:
           test "$zacht" = "404" || { echo "::error::een niet-bestaande pagina geeft $zacht in plaats van 404"; exit 1; }
           echo "  ok   een niet-bestaande pagina geeft 404 en geen 200"
 
+          # De doorverwijzingen, op een kleine proefsite bovenop dit image: een
+          # pagina, een map met index, en de homepagina. Elke Location moet een
+          # pad zijn zonder schema, host of poort. Achter Traefik werd een
+          # absolute doorverwijzing http://<host>:8080/ (24 september 2026).
+          mkdir -p proefsite/map
+          printf '<p>home</p>' > proefsite/index.html
+          printf '<p>contact</p>' > proefsite/contact.html
+          printf '<p>map</p>' > proefsite/map/index.html
+          printf 'FROM %s\nCOPY proefsite/ /usr/share/nginx/html/\n' "$IMAGE" > Proef.Dockerfile
+          docker build -q -t proefsite -f Proef.Dockerfile .
+          docker run -d --name proefsite --read-only --cap-drop ALL \
+            --tmpfs /tmp:rw,noexec,nosuid,size=16m -p 8081:8080 proefsite
+          for i in $(seq 1 20); do
+            curl -s -o /dev/null http://127.0.0.1:8081/ && break
+            sleep 1
+          done
+          fout=0
+          verwacht() {
+            local pad="$1" code="$2" plek="$3" kop werkelijk
+            kop="$(curl -s -o /dev/null -D - "http://127.0.0.1:8081$pad" | tr -d '\r')"
+            werkelijk="$(printf '%s\n' "$kop" | awk 'NR==1{print $2}') $(printf '%s\n' "$kop" | awk 'tolower($1)=="location:"{print $2}')"
+            if [ "$werkelijk" = "$code $plek" ]; then
+              echo "  ok   $pad geeft $code $plek"
+            else
+              echo "::error::$pad geeft '$werkelijk', verwacht '$code $plek'"; fout=1
+            fi
+          }
+          verwacht /contact              200 ""
+          verwacht /contact/             301 /contact
+          verwacht "/contact/?a=1"       301 "/contact?a=1"
+          verwacht /contact.html         301 /contact
+          verwacht /index.html           301 /
+          verwacht /map                  301 /map/
+          verwacht /map/                 200 ""
+          verwacht /map/index.html       301 /map/
+          verwacht /bestaatniet/         404 ""
+          verwacht /bestaatniet.html     404 ""
+          test "$fout" = 0
+
       - name: Wat je hierna nodig hebt
         run: |
           {
