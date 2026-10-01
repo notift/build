@@ -90,10 +90,14 @@ jobs:
           # pagina, een map met index, en de homepagina. Elke Location moet een
           # pad zijn zonder schema, host of poort. Achter Traefik werd een
           # absolute doorverwijzing http://<host>:8080/ (24 september 2026).
-          mkdir -p proefsite/map
+          mkdir -p proefsite/map proefsite/klachten
           printf '<p>home</p>' > proefsite/index.html
           printf '<p>contact</p>' > proefsite/contact.html
           printf '<p>map</p>' > proefsite/map/index.html
+          # Een pagina met een map van dezelfde naam ernaast. Dat liep in versie 5
+          # in een lus tussen /klachten en /klachten/ (1 oktober 2026).
+          printf '<p>klachten</p>' > proefsite/klachten.html
+          printf '<p>rugpijn</p>' > proefsite/klachten/rugpijn.html
           printf 'FROM %s\nCOPY proefsite/ /usr/share/nginx/html/\n' "$IMAGE" > Proef.Dockerfile
           docker build -q -t proefsite -f Proef.Dockerfile .
           docker run -d --name proefsite --read-only --cap-drop ALL \
@@ -125,6 +129,11 @@ jobs:
           verwacht /map                  301 /map/
           verwacht /map/                 200 ""
           verwacht /map/index.html       301 /map/
+          verwacht /klachten             200 ""
+          verwacht /klachten/            301 /klachten
+          verwacht /klachten.html        301 /klachten
+          verwacht /klachten/rugpijn     200 ""
+          verwacht /klachten/rugpijn/    301 /klachten/rugpijn
           verwacht /bestaatniet/         404 ""
           verwacht /bestaatniet.html     404 ""
           test "$fout" = 0
