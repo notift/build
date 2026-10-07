@@ -52,9 +52,39 @@ on:
       digest:
         description: "De digest van het gepubliceerde image. Hierop wordt uitgerold"
         value: ${{ jobs.publiceren.outputs.digest }}
+      image:
+        description: "De volledige, onveranderlijke imageverwijzing"
+        value: ${{ jobs.publiceren.outputs.image }}
       build:
         description: "Het buildnummer: datum plus commit"
         value: ${{ jobs.bouwen.outputs.build }}
+      module:
+        description: "De module waartoe het image hoort"
+        value: ${{ jobs.publiceren.outputs.module }}
+      project:
+        description: "Het project waartoe de module hoort"
+        value: ${{ jobs.publiceren.outputs.project }}
+      package:
+        description: "Het vaste ghcr-pakket van de module"
+        value: ${{ jobs.publiceren.outputs.package }}
+      repository:
+        description: "De bronrepo van deze run"
+        value: ${{ jobs.publiceren.outputs.repository }}
+      ref:
+        description: "De Git-ref van deze run"
+        value: ${{ jobs.publiceren.outputs.ref }}
+      commit:
+        description: "De volledige broncommit van deze run"
+        value: ${{ jobs.publiceren.outputs.commit }}
+      workflow:
+        description: "De onveranderlijke commit van de bouwlaag"
+        value: ${{ jobs.publiceren.outputs.workflow }}
+      run_id:
+        description: "De GitHub Actions-run"
+        value: ${{ jobs.publiceren.outputs.run_id }}
+      run_attempt:
+        description: "De poging van de GitHub Actions-run"
+        value: ${{ jobs.publiceren.outputs.run_attempt }}
 
 jobs:
   # ---------------------------------------------------------------------------
@@ -71,53 +101,38 @@ jobs:
       module: ${{ steps.manifest.outputs.module }}
       plan: ${{ steps.manifest.outputs.plan }}
       package: ${{ steps.manifest.outputs.package }}
+      workflow: ${{ steps.bouwlaag.outputs.sha }}
 
     steps:
       - name: De repo van het project
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - name: De bouwlaag van Notift
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          repository: notift/build
-          path: .notift
-          ref: v1
+      - name: De vaste bouwlaag bepalen
+        id: bouwlaag
+        # Buiten GITHUB_WORKSPACE: een klantbuild die alles naar dist kopieert
+        # kan deze map niet meenemen. v1 wordt precies eenmaal naar een hash
+        # opgelost; job 2 haalt daarna die hash op, nooit v1 opnieuw.
+        env:
+          BUILD_LAYER_DIR: ${{ runner.temp }}/notift-build
+        run: |
+          set -euo pipefail
+          SHA="$(git ls-remote https://github.com/notift/build.git 'refs/tags/v1^{}' | awk 'NR==1 {print $1}')"
+          [[ "$SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::v1 van notift/build kon niet naar een commit worden opgelost"; exit 1; }
+          git clone --quiet --no-checkout https://github.com/notift/build.git "$BUILD_LAYER_DIR"
+          git -C "$BUILD_LAYER_DIR" checkout --quiet --detach "$SHA"
+          ACTUAL="$(git -C "$BUILD_LAYER_DIR" rev-parse HEAD)"
+          test "$ACTUAL" = "$SHA" || { echo "::error::bouwlaag wees na checkout naar $ACTUAL, verwacht $SHA"; exit 1; }
+          echo "sha=$SHA" >> "$GITHUB_OUTPUT"
 
       - name: Het manifest lezen
         id: manifest
+        env:
+          BUILD_LAYER_DIR: ${{ runner.temp }}/notift-build
+          MANIFEST_PATH: ${{ inputs.manifest }}
         run: |
           set -euo pipefail
-          M="${{ inputs.manifest }}"
-          test -f "$M" || { echo "::error::$M ontbreekt in deze repo. Zie de README van de bouwlaag."; exit 1; }
-          python3 - "$M" >> "$GITHUB_OUTPUT" <<'PY'
-          import json, sys
-          m = json.load(open(sys.argv[1]))
-          if "customer" in m:
-              sys.exit("manifestveld 'customer' is vervallen; gebruik organisation, project en module")
-          for veld in ("organisation", "project", "module", "plan", "package"):
-              if not m.get(veld):
-                  sys.exit(f"manifest mist het veld '{veld}'")
-          import re
-          for veld, patroon in (("organisation", r"^org_[0-9]{5}$"), ("project", r"^prj_[0-9]{5}$"), ("module", r"^mod_[0-9]{5}$")):
-              if not re.fullmatch(patroon, m[veld]):
-                  sys.exit(f"manifestveld '{veld}' heeft ongeldige vorm: {m[veld]}")
-          verwacht_pakket = f"ghcr.io/notift/{m['module']}"
-          if m["package"] != verwacht_pakket:
-              sys.exit(f"manifestveld 'package' moet exact '{verwacht_pakket}' zijn, niet '{m['package']}'")
-          b = m.get("build") or {}
-          for veld in ("command", "output"):
-              if not b.get(veld):
-                  sys.exit(f"manifest mist het veld 'build.{veld}'")
-          print(f"organisation={m['organisation']}")
-          print(f"project={m['project']}")
-          print(f"module={m['module']}")
-          print(f"plan={m['plan']}")
-          print(f"package={m['package'].lower()}")
-          print(f"command={b['command']}")
-          print(f"output={b['output']}")
-          print(f"node={b.get('node', '22')}")
-          print(f"manager={b.get('manager', 'npm')}")
-          PY
+          test -f "$MANIFEST_PATH" || { echo "::error::$MANIFEST_PATH ontbreekt in deze repo. Zie de README van de bouwlaag."; exit 1; }
+          python3 "$BUILD_LAYER_DIR/checks/check_output.py" --github-output "$MANIFEST_PATH" >> "$GITHUB_OUTPUT"
 
       - name: Het buildnummer
         id: nummer
@@ -132,9 +147,11 @@ jobs:
           cache: ${{ steps.manifest.outputs.manager }}
 
       - name: Pakketten installeren
+        env:
+          MANAGER: ${{ steps.manifest.outputs.manager }}
         run: |
           set -euo pipefail
-          case "${{ steps.manifest.outputs.manager }}" in
+          case "$MANAGER" in
             npm)  npm ci ;;
             pnpm) corepack enable && pnpm install --frozen-lockfile ;;
             yarn) corepack enable && yarn install --immutable ;;
@@ -142,13 +159,22 @@ jobs:
           esac
 
       - name: Bouwen
-        run: ${{ steps.manifest.outputs.command }}
+        env:
+          BUILD_COMMAND: ${{ steps.manifest.outputs.command }}
+        run: |
+          set -euo pipefail
+          read -r -a COMMAND <<< "$BUILD_COMMAND"
+          "${COMMAND[@]}"
 
       - name: De uitvoer keuren
         # Doel 4. Weigeren op wat SEO of veiligheid breekt, waarschuwen op de
         # rest. Dit kijkt naar wat er werkelijk uit de build kwam en raadt niets
         # uit de broncode. Job 2 doet dit nog een keer.
-        run: python3 .notift/checks/check_output.py "${{ steps.manifest.outputs.output }}" "${{ inputs.manifest }}"
+        env:
+          BUILD_LAYER_DIR: ${{ runner.temp }}/notift-build
+          BUILD_OUTPUT: ${{ steps.manifest.outputs.output }}
+          MANIFEST_PATH: ${{ inputs.manifest }}
+        run: python3 "$BUILD_LAYER_DIR/checks/check_output.py" "$BUILD_OUTPUT" "$MANIFEST_PATH"
 
       - name: Het resultaat doorgeven
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -170,6 +196,16 @@ jobs:
       packages: write
     outputs:
       digest: ${{ steps.publiceren.outputs.digest }}
+      image: ${{ steps.referentie.outputs.image }}
+      module: ${{ needs.bouwen.outputs.module }}
+      project: ${{ needs.bouwen.outputs.project }}
+      package: ${{ needs.bouwen.outputs.package }}
+      repository: ${{ steps.herkomst.outputs.repository }}
+      ref: ${{ steps.herkomst.outputs.ref }}
+      commit: ${{ steps.herkomst.outputs.commit }}
+      workflow: ${{ needs.bouwen.outputs.workflow }}
+      run_id: ${{ steps.herkomst.outputs.run_id }}
+      run_attempt: ${{ steps.herkomst.outputs.run_attempt }}
 
     steps:
       - name: De repo van het project
@@ -177,20 +213,19 @@ jobs:
         # artefact. Wat door job 1 heen komt is aangeraakt door de klant.
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - name: De bouwlaag van Notift
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          repository: notift/build
-          path: .notift
-          ref: v1
-
-      - name: Welke versie van de bouwlaag dit is
-        id: bouwlaag
-        # Doel 5 wil kunnen aantonen welke versie van de workflow een image
-        # mocht bouwen. `v1` is een tag van onszelf en die kunnen we verplaatsen,
-        # dus als label bewijst hij niets. Dit is de hash die werkelijk is
-        # uitgecheckt, en die kan niet meer bewegen.
-        run: echo "sha=$(git -C .notift rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+      - name: Dezelfde vaste bouwlaag ophalen
+        env:
+          BUILD_LAYER_DIR: ${{ runner.temp }}/notift-build
+          EXPECTED_SHA: ${{ needs.bouwen.outputs.workflow }}
+        run: |
+          set -euo pipefail
+          [[ "$EXPECTED_SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::job 1 gaf geen geldige bouwlaaghash door"; exit 1; }
+          git init --quiet "$BUILD_LAYER_DIR"
+          git -C "$BUILD_LAYER_DIR" remote add origin https://github.com/notift/build.git
+          git -C "$BUILD_LAYER_DIR" fetch --quiet --depth=1 origin "$EXPECTED_SHA"
+          git -C "$BUILD_LAYER_DIR" checkout --quiet --detach FETCH_HEAD
+          ACTUAL_SHA="$(git -C "$BUILD_LAYER_DIR" rev-parse HEAD)"
+          test "$ACTUAL_SHA" = "$EXPECTED_SHA" || { echo "::error::bouwlaaghash wijkt af: $ACTUAL_SHA, verwacht $EXPECTED_SHA"; exit 1; }
 
       - name: Het resultaat ophalen
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
@@ -201,7 +236,10 @@ jobs:
       - name: De uitvoer opnieuw keuren
         # Het artefact is de brug tussen twee jobs, en job 1 draaide vreemde
         # code. Wat daar goedgekeurd is, hoeft niet te zijn wat hier aankomt.
-        run: python3 .notift/checks/check_output.py .notift-context/site "${{ inputs.manifest }}"
+        env:
+          BUILD_LAYER_DIR: ${{ runner.temp }}/notift-build
+          MANIFEST_PATH: ${{ inputs.manifest }}
+        run: python3 "$BUILD_LAYER_DIR/checks/check_output.py" .notift-context/site "$MANIFEST_PATH"
 
       - name: Vooraf comprimeren
         # Wat je zelf kunt oplossen, moet je niet aan de klant melden. nginx
@@ -219,11 +257,15 @@ jobs:
         # vergelijkt het met wat hij verwachtte. Zonder dit weet je niet met
         # welke versie je praat. Het wordt hier gezet en niet in job 1, want de
         # klant mag dit nummer niet kunnen schrijven.
-        run: printf '%s' "${{ needs.bouwen.outputs.build }}" > .notift-context/site/_health
+        env:
+          BUILD: ${{ needs.bouwen.outputs.build }}
+        run: printf '%s' "$BUILD" > .notift-context/site/_health
 
       - name: De bouwcontext klaarzetten
         # De Dockerfile komt uit onze eigen repo en niet uit het artefact.
-        run: cp .notift/base/site.Dockerfile .notift-context/Dockerfile
+        env:
+          BUILD_LAYER_DIR: ${{ runner.temp }}/notift-build
+        run: cp "$BUILD_LAYER_DIR/base/site.Dockerfile" .notift-context/Dockerfile
 
       - name: Inloggen bij ghcr.io
         uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
@@ -260,21 +302,64 @@ jobs:
             PLAN=${{ needs.bouwen.outputs.plan }}
             COMMIT=${{ github.sha }}
             REPO=${{ github.repository }}
-            WORKFLOW=notift/build@${{ steps.bouwlaag.outputs.sha }}
+            WORKFLOW=notift/build@${{ needs.bouwen.outputs.workflow }}
+
+      - name: De onveranderlijke imageverwijzing
+        id: referentie
+        env:
+          PACKAGE: ${{ needs.bouwen.outputs.package }}
+          DIGEST: ${{ steps.publiceren.outputs.digest }}
+        run: |
+          set -euo pipefail
+          [[ "$DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "::error::build-push gaf geen digest terug"; exit 1; }
+          echo "image=$PACKAGE@$DIGEST" >> "$GITHUB_OUTPUT"
+
+      - name: Herkomst voor de volgende laag
+        id: herkomst
+        env:
+          REPOSITORY: ${{ github.repository }}
+          REF: ${{ github.ref }}
+          COMMIT: ${{ github.sha }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+        run: |
+          set -euo pipefail
+          for V in REPOSITORY REF COMMIT RUN_ID RUN_ATTEMPT; do printf '%s=%s\n' "${V,,}" "${!V}" >> "$GITHUB_OUTPUT"; done
 
       - name: Wat je hierna nodig hebt
+        env:
+          BUILD: ${{ needs.bouwen.outputs.build }}
+          IMAGE: ${{ steps.referentie.outputs.image }}
+          MODULE: ${{ needs.bouwen.outputs.module }}
+          PROJECT: ${{ needs.bouwen.outputs.project }}
+          PACKAGE: ${{ needs.bouwen.outputs.package }}
+          REPOSITORY: ${{ github.repository }}
+          REF: ${{ github.ref }}
+          COMMIT: ${{ github.sha }}
+          WORKFLOW: ${{ needs.bouwen.outputs.workflow }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
         run: |
+          set -euo pipefail
           {
             echo "### Gepubliceerd"
             echo ""
             echo "| | |"
             echo "|---|---|"
-            echo "| Build | \`${{ needs.bouwen.outputs.build }}\` |"
-            echo "| Digest | \`${{ steps.publiceren.outputs.digest }}\` |"
+            echo "| Build | \`$BUILD\` |"
+            echo "| Image | \`$IMAGE\` |"
+            echo "| Module | \`$MODULE\` |"
+            echo "| Project | \`$PROJECT\` |"
+            echo "| Pakket | \`$PACKAGE\` |"
+            echo "| Repo | \`$REPOSITORY\` |"
+            echo "| Ref | \`$REF\` |"
+            echo "| Commit | \`$COMMIT\` |"
+            echo "| Bouwlaag | \`$WORKFLOW\` |"
+            echo "| Run | \`$RUN_ID\`, poging \`$RUN_ATTEMPT\` |"
             echo ""
             echo "Uitrollen:"
             echo ""
             echo '```'
-            echo "sudo ./deploy.sh ${{ needs.bouwen.outputs.module }} ${{ needs.bouwen.outputs.package }}@${{ steps.publiceren.outputs.digest }}"
+            echo "sudo ./deploy.sh $MODULE $IMAGE"
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"

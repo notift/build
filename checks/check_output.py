@@ -63,6 +63,22 @@ JWT = re.compile(rb"\beyJ[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-
 # type toe aan deze verzameling, niet een extra uitzondering in een scanlus.
 TOEGESTANE_PUBLIEKE_SLEUTELTYPEN = {"supabase_anon_key"}
 
+# Deze waarden gaan vanuit het manifest naar een omgeving van de workflow. Ze
+# zijn dus geen vrij stuk shelltekst. Een build zelf mag alleen een script van
+# de gekozen pakketmanager starten; wie een afwijkende bouwvorm nodig heeft,
+# voegt die als script aan package.json toe in plaats van shellsyntaxis aan dit
+# contract toe te voegen.
+VORMEN = {
+    "organisation": r"^org_[0-9]{5}$",
+    "project": r"^prj_[0-9]{5}$",
+    "module": r"^mod_[0-9]{5}$",
+    "plan": r"^[a-z][a-z0-9-]{0,62}$",
+    "build.command": r"^(?:npm|pnpm|yarn) run [A-Za-z0-9][A-Za-z0-9:_-]*(?: -- [A-Za-z0-9][A-Za-z0-9._:=@/+,-]*)*$",
+    "build.output": r"^[A-Za-z0-9][A-Za-z0-9._/-]*$",
+    "build.node": r"^[0-9]{1,2}(?:\.[0-9]+){0,2}$",
+    "build.manager": r"^(?:npm|pnpm|yarn)$",
+}
+
 
 class Bevindingen:
     def __init__(self):
@@ -143,11 +159,17 @@ def lees_manifest(pad):
     for veld in ("organisation", "project", "module", "plan", "package", "build"):
         if not m.get(veld):
             sys.exit(f"manifest mist het veld '{veld}': {pad}")
+    if not isinstance(m["build"], dict):
+        sys.exit("manifestveld 'build' moet een object zijn")
     for veld in ("command", "output"):
         if not m["build"].get(veld):
             sys.exit(f"manifest mist het veld 'build.{veld}': {pad}")
+    m["build"].setdefault("node", "22")
+    m["build"].setdefault("manager", "npm")
     m.setdefault("searchable", True)
     m.setdefault("allowed_public_keys", [])
+    if not isinstance(m["searchable"], bool):
+        sys.exit("manifestveld 'searchable' moet true of false zijn")
     if not isinstance(m["allowed_public_keys"], list):
         sys.exit("manifestveld 'allowed_public_keys' moet een lijst zijn")
     for nummer, sleutel in enumerate(m["allowed_public_keys"], start=1):
@@ -183,18 +205,43 @@ def lees_manifest(pad):
                 f"waarde is {werkelijk_type}: een service_role- of andere "
                 "niet-publieke sleutel mag nooit op de uitzonderingenlijst"
             )
-    vormen = {
-        "organisation": r"^org_[0-9]{5}$",
-        "project": r"^prj_[0-9]{5}$",
-        "module": r"^mod_[0-9]{5}$",
+    waarden = {
+        "organisation": m["organisation"],
+        "project": m["project"],
+        "module": m["module"],
+        "plan": m["plan"],
+        "build.command": m["build"]["command"],
+        "build.output": m["build"]["output"],
+        "build.node": m["build"]["node"],
+        "build.manager": m["build"]["manager"],
     }
-    for veld, patroon in vormen.items():
-        if not re.fullmatch(patroon, m[veld]):
-            sys.exit(f"manifestveld '{veld}' heeft ongeldige vorm: {m[veld]}")
+    for veld, waarde in waarden.items():
+        if not isinstance(waarde, str) or not re.fullmatch(VORMEN[veld], waarde):
+            sys.exit(f"manifestveld '{veld}' heeft ongeldige vorm: {waarde}")
+    if any(deel in ("", ".", "..") for deel in m["build"]["output"].split("/")):
+        sys.exit("manifestveld 'build.output' moet een gewone relatieve map zijn")
     verwacht_pakket = f"ghcr.io/notift/{m['module']}"
     if m["package"] != verwacht_pakket:
         sys.exit(f"manifestveld 'package' moet exact '{verwacht_pakket}' zijn, niet '{m['package']}'")
     return m
+
+
+def github_output(manifestpad):
+    """Geeft uitsluitend al op vorm getoetste workflowgegevens terug."""
+    m = lees_manifest(manifestpad)
+    waarden = {
+        "organisation": m["organisation"],
+        "project": m["project"],
+        "module": m["module"],
+        "plan": m["plan"],
+        "package": m["package"].lower(),
+        "command": m["build"]["command"],
+        "output": m["build"]["output"],
+        "node": m["build"]["node"],
+        "manager": m["build"]["manager"],
+    }
+    for naam, waarde in waarden.items():
+        print(f"{naam}={waarde}")
 
 
 def bestanden(root):
@@ -363,6 +410,9 @@ def controleer_vorm(root, b):
 
 
 def main():
+    if len(sys.argv) == 3 and sys.argv[1] == "--github-output":
+        github_output(sys.argv[2])
+        return 0
     if len(sys.argv) != 3:
         sys.exit("Gebruik: check_output.py <uitvoermap> <manifest.json>")
 

@@ -32,6 +32,7 @@ build wordt weggegooid. Wat hij aflevert is een image op `ghcr.io` dat het artef
 ```
 ./checks/check-output-proof.sh                       eenentwintig gevallen, weigeren en waarschuwen
 ./checks/check-private-image-proof.sh                publieke en private tegenproef voor de afschermingsmeting
+./checks/build-layer-proof.sh                         manifestinjectie, vaste hash en werkmapgrens
 python3 checks/check_output.py dist notift.json      een echte uitvoer keuren
 ./release.sh                                         tonen wat er naar notift/build zou gaan
 ./release.sh --push v1                               publiceren en de tag verplaatsen
@@ -82,7 +83,9 @@ en dan bouwt een klant met code die hier niet staat.
 | `release.sh` | Gaat niet mee |
 
 **De tag `v1` verplaatsen is een aparte handeling**, en met opzet. Elke projectworkflow wijst naar
-die tag, dus verplaatsen raakt in een keer elke klant.
+die tag, dus verplaatsen raakt in een keer elke klant. Binnen één run wordt die tag precies eenmaal
+naar een commit-hash opgelost. Beide jobs halen daarna die hash op; job 2 weigert als zijn checkout
+niet exact die commit is. Een release tussen de jobs kan een lopende build dus niet veranderen.
 
 ## Hoe het loopt
 
@@ -95,7 +98,7 @@ die tag, dus verplaatsen raakt in een keer elke klant.
 | 5 | `bouwen` | Die uitvoer gaat als artefact naar de volgende job |
 | 6 | `publiceren` | De uitvoer wordt **opnieuw gekeurd**, gecomprimeerd en gestempeld met het buildnummer |
 | 7 | `publiceren` | Het basisimage plus die map wordt gepubliceerd op `ghcr.io`, met alle labels |
-| 8 | `publiceren` | De samenvatting toont de digest en het commando om uit te rollen |
+| 8 | `publiceren` | De samenvatting en workflowoutputs geven de volledige digestreferentie plus alle herkomst voor de platformopdracht |
 
 Stap 4 raadt niets uit de broncode. Een voorspelling op basis van bestanden in een repo heb je
 soms mis, en dan wijs je een klant af die wel gehost had kunnen worden.
@@ -125,6 +128,32 @@ Plus de tijd om het artefact heen en weer te zetten. Dat is meegerekend in de ko
 
 Dit is ook de voorwaarde voor variant C en voor een eigen bouwmachine. Zie "Waar deze laag naartoe
 groeit" in `docs/07-bouwlaag.md`.
+
+## De grens rond het manifest
+
+Het manifest is invoer van de klant en geen stukje workflow. Elke waarde krijgt daarom bij het
+lezen een vaste vorm: organisatie, project en module hebben hun codevorm, het pakket moet precies
+bij de module horen, het plan heeft alleen kleine letters/cijfers/streepjes, en de bouwvorm is een
+`npm`, `pnpm` of `yarn`-script met veilige argumenten. Uitvoer is een gewone relatieve map. Daarna
+gaan de waarden alleen via omgevingsvariabelen naar een `run:`-stap; er staat geen expression uit
+het manifest in shelltekst.
+
+De bouwlaag zelf wordt buiten de werkmap van het project uitgecheckt. Een klant die alles naar
+`dist` kopieert kan daardoor geen `.notift`-proefbestanden meenemen. `build-layer-proof.sh` wijzigt
+ieder manifestveld met shellsubstitutie, backticks, puntkomma, newline en `../`, en bewijst dat ze
+allemaal al bij het lezen falen.
+
+## Wat de volgende laag uit een publicatie krijgt
+
+De reusable workflow geeft naast `digest` en `build` ook `image`, `module`, `project`, `package`,
+`repository`, `ref`, `commit`, `workflow`, `run_id` en `run_attempt` terug. `image` is altijd de
+volledige vorm `ghcr.io/notift/mod_00001@sha256:...`; een tag is nooit een uitrolopdracht.
+
+De platformontvanger moet vóór hij een opdracht opslaat controleren dat de ondertekende repo bij
+de module hoort, dat package en module exact overeenkomen, en dat `ref` precies
+`refs/heads/main` is. `deploy.sh` moet dezelfde repo- en workflowtoelating uit de moduleconfiguratie
+controleren, naast de bestaande label- en identiteitscontrole. Labels alleen zijn verklaringen van
+de bouwer, geen bewijs. Deze ronde bouwt die runtime- en platformcontroles bewust niet.
 
 ## Wat weigert en wat waarschuwt
 
@@ -171,7 +200,7 @@ en stopt met een fout als `gh` niet beschikbaar of niet ingelogd is.
 | 1 | ~~Een repo `notift/build` aanmaken met een tag `v1`~~ **Gedaan 2026-09-04.** **Publiek**, want een projectrepo kan een prive workflow-repo niet uitchecken. `v1` staat en publiceren gaat met `release.sh`. **Er komt nooit iets in deze repo dat niet openbaar mag zijn** | GitHub |
 | 2 | ~~Elke `uses:` vastzetten op een commit-hash~~ **Gedaan 2026-09-04.** Alle vier de actions staan vast op een hash, met de versie als commentaar erachter. Meteen ook naar de actuele hoofdversie, want alle vier stonden een major achter en draaien nu op node24. Nagekeken dat elke invoerwaarde die wij gebruiken daar nog bestaat | `workflow/build-and-publish.yml` |
 | 3 | ~~Het basisimage publiceren~~ **Gedaan 2026-09-04.** Staat sinds 1 oktober op **versie 6**, digest `sha256:64f027ff`: `$uri.html` voor `$uri/`, want een pagina naast een map van dezelfde naam liep in een lus. Versie 5 (`sha256:2cc3dd81`, 24 september) bracht doorverwijzingen zonder de interne poort, en een 301 voor een slash aan het eind en voor `.html`. Versie 4 (`sha256:a36a47e5`) stuurde `/` in een lus naar zichzelf en is vervangen. Versie 3 (`sha256:31bcdc43`) was de eerste die werkelijk van de organisatie is. Versie 1 en 2 zijn weg: die hoorden bij het gebruikersaccount en hielden de naam bezet. Nagemeten op het gepubliceerde image: geen root, poort 8080, `/_health` antwoordt vanuit een alleen-lezen container, en een niet-bestaande pagina geeft 404 en geen 200 | Eenmalig |
-| 4 | ~~Het deployeraccount en het token~~ **Gedaan 2026-09-04.** `notift-deploy` is **lid van de organisatie** met Read op het pakket `prj_00001`. Lid worden was nodig omdat een organisatie pakkettoegang alleen aan leden en teams geeft. Het kan alleen veilig doordat de standaardrechten van de organisatie op `none` staan, anders had dit account leesrecht op elke repo gekregen. Het token staat in `/root/.docker/config.json` op `web-01` en **verloopt op 2026-12-03**. Per nieuw project moet de pakkettoegang opnieuw gegeven worden, en daar is geen API voor | GitHub plus de machine |
+| 4 | ~~Het deployeraccount en het token~~ **Gedaan 2026-09-04.** `notift-deploy` is **lid van de organisatie** met Read op het pakket `prj_00001`. Lid worden was nodig omdat een organisatie pakkettoegang alleen aan leden en teams geeft. Het kan alleen veilig doordat de standaardrechten van de organisatie op `none` staan, anders had dit account leesrecht op elke repo gekregen. Het token staat in `/root/.docker/config.json` op `web-01` en `platform-01` en **verloopt op 2026-12-03**. Vernieuwen: `token-renewal.md`. Per nieuw project moet de pakkettoegang opnieuw gegeven worden, en daar is geen API voor | GitHub plus de machine |
 | 5 | Per project een `notift.json` en een workflow van drie regels die de onze aanroept. Zie `notift/testsite` als voorbeeld dat werkt | Per klant |
 
 Punt 4 is een bewuste keuze en geen gemak: zie doel 3 in `docs/07-bouwlaag.md`, met de reden en de

@@ -27,6 +27,18 @@ jobs:
       packages: write
 
     steps:
+      - name: De versie toetsen
+        id: versie
+        env:
+          VERSION: ${{ inputs.versie }}
+        run: |
+          set -euo pipefail
+          case "$VERSION" in
+            [0-9]|[1-9][0-9]*) ;;
+            *) echo "::error::versie moet een positief geheel getal zijn"; exit 1 ;;
+          esac
+          echo "value=$VERSION" >> "$GITHUB_OUTPUT"
+
       - name: De bouwlaag
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -45,16 +57,18 @@ jobs:
           push: true
           # Punt 8 van het contract: de machines zijn x86.
           platforms: linux/amd64
-          tags: ghcr.io/notift/static-base:${{ inputs.versie }}
+          tags: ghcr.io/notift/static-base:${{ steps.versie.outputs.value }}
 
       - name: Nakijken dat het image is wat het moet zijn
         # Geinstalleerd is niet actief, aanwezig is niet aangekomen. Dit haalt
         # het gepubliceerde image op via zijn digest en controleert de drie
         # dingen waar de runtimelaag op leunt: geen root, poort 8080, en een
         # gezondheidspad dat antwoordt op een alleen-lezen bestandssysteem.
+        env:
+          DIGEST: ${{ steps.publiceren.outputs.digest }}
         run: |
           set -euo pipefail
-          IMAGE="ghcr.io/notift/static-base@${{ steps.publiceren.outputs.digest }}"
+          IMAGE="ghcr.io/notift/static-base@$DIGEST"
           docker pull -q "$IMAGE"
 
           GEBRUIKER="$(docker inspect -f '{{.Config.User}}' "$IMAGE")"
@@ -139,14 +153,17 @@ jobs:
           test "$fout" = 0
 
       - name: Wat je hierna nodig hebt
+        env:
+          VERSION: ${{ steps.versie.outputs.value }}
+          DIGEST: ${{ steps.publiceren.outputs.digest }}
         run: |
           {
             echo "### Het basisimage staat er"
             echo ""
             echo "| | |"
             echo "|---|---|"
-            echo "| Tag | \`ghcr.io/notift/static-base:${{ inputs.versie }}\` |"
-            echo "| Digest | \`${{ steps.publiceren.outputs.digest }}\` |"
+            echo "| Tag | \`ghcr.io/notift/static-base:$VERSION\` |"
+            echo "| Digest | \`$DIGEST\` |"
             echo ""
             echo "**Dit pakket is publiek.** Zet nooit iets in dit image dat niet openbaar mag zijn."
             echo ""
