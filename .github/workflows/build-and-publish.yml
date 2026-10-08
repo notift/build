@@ -48,6 +48,10 @@ on:
         description: "Pad naar het manifest in de repo van het project"
         type: string
         default: "notift.json"
+    secrets:
+      NOTIFT_DEPLOY_SECRET:
+        description: "HMAC-geheim van de gekoppelde repository"
+        required: false
     outputs:
       digest:
         description: "De digest van het gepubliceerde image. Hierop wordt uitgerold"
@@ -325,6 +329,23 @@ jobs:
         run: |
           set -euo pipefail
           for V in REPOSITORY REF COMMIT RUN_ID RUN_ATTEMPT; do printf '%s=%s\n' "${V,,}" "${!V}" >> "$GITHUB_OUTPUT"; done
+
+      - name: Staging aan het platform melden
+        env:
+          NOTIFT_DEPLOY_SECRET: ${{ secrets.NOTIFT_DEPLOY_SECRET }}
+          BUILD_LAYER_DIR: ${{ runner.temp }}/notift-build
+          BUILD: ${{ needs.bouwen.outputs.build }}
+          IMAGE: ${{ steps.referentie.outputs.image }}
+          MODULE: ${{ needs.bouwen.outputs.module }}
+          PROJECT: ${{ needs.bouwen.outputs.project }}
+          PACKAGE: ${{ needs.bouwen.outputs.package }}
+          REPOSITORY: ${{ github.repository }}
+          REF: ${{ github.ref }}
+          COMMIT: ${{ github.sha }}
+          WORKFLOW: ${{ needs.bouwen.outputs.workflow }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+        run: python3 "$BUILD_LAYER_DIR/checks/notify_deployment.py"
 
       - name: Wat je hierna nodig hebt
         env:

@@ -40,6 +40,12 @@ python3 checks/check_output.py dist notift.json      een echte uitvoer keuren
 ./verify.sh mod_90001                                en die module erbij
 ```
 
+**Na elke `release.sh --push v1`, zodra deel 3 draait:** de nieuwe commit van `notift/build` op de
+lijst toegestane bouwversies, met `dashboard.allow_build_workflow('<40 hex>', '<reden>')` als admin
+(`10-dashboard.md` besluit 58). Anders weigert het platform elke push die met de nieuwe versie
+gebouwd is. De oude versie pas intrekken (`retire_build_workflow`) als alle sites opnieuw gebouwd
+zijn; wat er al met de oude gebouwd is, blijft terugrolbaar.
+
 ## Waarom er een `verify.sh` is voor deze laag
 
 **Dit is de eerste laag die we niet bezitten.** Bij onze eigen machines is "staat het er echt" een
@@ -220,3 +226,31 @@ zo'n klant erbij hoort, dus dit is een gat en geen keuze.
 
 De proef op de echte keten is **gedaan** op 4 september 2026, met `notift/testsite`. Zie
 "Wat de eerste proef moet aantonen" in `docs/07-bouwlaag.md`.
+
+## Ondertekende stagingmelding, ronde C
+
+Na het publiceren roept de publicatiejob `checks/notify_deployment.py` aan. Die tekent de ruwe
+UTF-8 JSON-body met HMAC-SHA-256 over `<timestamp>.<body>` en POST naar de vaste URL
+`https://app.notift.nl/api/deployments`. Het event-id staat in body en header.
+Alleen `refs/heads/main` meldt staging. HTTP 202 is groen; weigering, redirect of netwerkfout is rood.
+De sender drukt geen responsebody, signature of geheim af; het geheim komt uitsluitend uit zijn env.
+
+`NOTIFT_DEPLOY_SECRET` is een optioneel workflow_call-secret. Zonder geheim geeft de stap een
+zichtbare `::warning::` en exit 0, zodat de bestaande vier sites blijven publiceren. Per gekoppelde
+klantrepo moet de aanroep het geheim expliciet doorgeven, uitsluitend aan deze reusable workflow:
+
+```yaml
+jobs:
+  publiceren:
+    uses: notift/build/.github/workflows/build-and-publish.yml@v1
+    permissions:
+      contents: read
+      packages: write
+    secrets:
+      NOTIFT_DEPLOY_SECRET: ${{ secrets.NOTIFT_DEPLOY_SECRET }}
+```
+
+De sender reist met de bestaande kopie van `checks/` in `release.sh`; geen wijziging van release.sh
+nodig. Geef na het verplaatsen van v1 de nieuwe bouwlaaghash vrij via het dashboard-adminscript.
+De job zonder gekoppeld geheim blijft groen. Met een geheim moet het dashboard al met de nieuwe
+platformsleutel draaien. Het serverdraaiboek staat in `docs/prompts/geheel-build-10-oplevering.md`.
