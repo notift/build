@@ -19,6 +19,11 @@ on:
         required: true
         default: "1"
 
+# Least privilege for any job that does not name its own permissions. The one job below asks for
+# packages: write itself, because it pushes the base image to ghcr.io.
+permissions:
+  contents: read
+
 jobs:
   publiceren:
     runs-on: ubuntu-latest

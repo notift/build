@@ -90,6 +90,11 @@ on:
         description: "De poging van de GitHub Actions-run"
         value: ${{ jobs.publiceren.outputs.run_attempt }}
 
+# Least privilege for any job that does not name its own permissions. Both jobs below do, and a
+# caller can only narrow these further (docs/prompts/geheel-build-23-oplevering.md).
+permissions:
+  contents: read
+
 jobs:
   # ---------------------------------------------------------------------------
   # Job 1: hier draait de code van de klant. Geen packages:write, geen token.
@@ -244,6 +249,20 @@ jobs:
           BUILD_LAYER_DIR: ${{ runner.temp }}/notift-build
           MANIFEST_PATH: ${{ inputs.manifest }}
         run: python3 "$BUILD_LAYER_DIR/checks/check_output.py" .notift-context/site "$MANIFEST_PATH"
+
+      - name: Het formulierscript van het platform
+        # The forms script comes from this build layer at the pinned hash, never from the customer
+        # and never from the dashboard at run time. /_notift/ is reserved: whatever the customer
+        # build put there is removed first, so a planted forms.js (or a symlink) cannot survive.
+        # Placed before compression so nginx also serves a gzip copy.
+        env:
+          BUILD_LAYER_DIR: ${{ runner.temp }}/notift-build
+        run: |
+          set -euo pipefail
+          rm -rf .notift-context/site/_notift
+          install -d -m 0755 .notift-context/site/_notift .notift-context/site/_notift/embed
+          install -m 0644 "$BUILD_LAYER_DIR/embed/forms.js" .notift-context/site/_notift/embed/forms.js
+          cmp "$BUILD_LAYER_DIR/embed/forms.js" .notift-context/site/_notift/embed/forms.js
 
       - name: Vooraf comprimeren
         # Wat je zelf kunt oplossen, moet je niet aan de klant melden. nginx

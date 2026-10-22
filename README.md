@@ -23,6 +23,8 @@ build wordt weggegooid. Wat hij aflevert is een image op `ghcr.io` dat het artef
 | `checks/check_output.py` | Doel 4: keurt de uitvoer van de build. Weigert of waarschuwt |
 | `checks/check-output-proof.sh` | Het bewijs dat die controle werkelijk weigert. Draait op de Mac |
 | `checks/check-private-image-proof.sh` | Tegenproef voor doel 3: publiek rood en privaat groen op dezelfde meting |
+| `embed/forms.js` | Het formulierscript. Job 2 zet het in elk site-image op `/_notift/embed/forms.js`, over wat de klant daar neerzette (`docs/11-formulieren.md`, build 23) |
+| `checks/forms-embed-proof.sh` | Draait die stap uit de workflow tegen een geplant script en meet het resultaat met de nginx.conf van het basisimage |
 | `workflow/build-and-publish.yml` | De herbruikbare workflow die elk project aanroept. Twee jobs, en dat is een grens |
 | `workflow/base-image.yml` | Het basisimage bouwen en publiceren. Met de hand te starten, niet vanzelf |
 | `notift.example.json` | Het manifest dat in de repo van een project komt |
@@ -33,18 +35,90 @@ build wordt weggegooid. Wat hij aflevert is een image op `ghcr.io` dat het artef
 ./checks/check-output-proof.sh                       eenentwintig gevallen, weigeren en waarschuwen
 ./checks/check-private-image-proof.sh                publieke en private tegenproef voor de afschermingsmeting
 ./checks/build-layer-proof.sh                         manifestinjectie, vaste hash en werkmapgrens
+./checks/forms-embed-proof.sh                         het formulierscript komt uit de bouwlaag, niet van de klant
+./checks/release-signing-proof.sh <map>               release.sh en restore-release.sh pushen alleen een ondertekende commit
 python3 checks/check_output.py dist notift.json      een echte uitvoer keuren
 ./release.sh                                         tonen wat er naar notift/build zou gaan
 ./release.sh --push v1                               publiceren en de tag verplaatsen
+./restore-release.sh <commit> --push v1              een eerdere publicatie terugzetten, ondertekend
 ./verify.sh                                          de stand bij GitHub
 ./verify.sh mod_90001                                en die module erbij
 ```
 
-**Na elke `release.sh --push v1`, zodra deel 3 draait:** de nieuwe commit van `notift/build` op de
-lijst toegestane bouwversies, met `dashboard.allow_build_workflow('<40 hex>', '<reden>')` als admin
-(`10-dashboard.md` besluit 58). Anders weigert het platform elke push die met de nieuwe versie
-gebouwd is. De oude versie pas intrekken (`retire_build_workflow`) als alle sites opnieuw gebouwd
-zijn; wat er al met de oude gebouwd is, blijft terugrolbaar.
+**Na elke `release.sh --push v1`:** niets met de hand. `release.sh` tekent de commit in `notift/build`
+met Leons signeersleutel en pusht alleen als de handtekening klopt. Op `platform-01` haalt
+`approve-build.sh` elke vijf minuten `v1` op, controleert de handtekening zelf en zet de commit dan
+op de lijst toegestane bouwversies. Zie "Ondertekende releases" hieronder. De oude versie pas
+intrekken (`retire_build_workflow`, als admin) als alle sites opnieuw gebouwd zijn; wat er al met de
+oude gebouwd is, blijft terugrolbaar.
+
+## Ondertekende releases
+
+Besluit Leon, 19 oktober 2026 (keuze L4 optie c): **een versie van de bouwlaag is vrijgegeven als en
+alleen als de commit in `notift/build` ondertekend is met Leons sleutel.** Wie GitHub, deze repo of
+`notift/build` overneemt, heeft de privésleutel niet, en een overgenomen dashboard of werker kan de
+lijst niet meer bijwerken.
+
+| Stap | Waar | Wat |
+|---|---|---|
+| 1 | Mac, `release.sh --push v1` | `git commit -S` met de sleutel uit Leons git-config (alleen in een kloon van `notift/build`), daarna dezelfde controle als op de server. Niet goed ondertekend: niets gepusht, ook de tag niet |
+| 2 | `platform-01`, cron elke 5 minuten | `approve-build.sh` haalt `refs/tags/v1` op met git (elk object wordt op zijn hash gecontroleerd) |
+| 3 | idem, elke ronde, ook als de commit al op de lijst staat | `lib/build_signature.py`: de hash van het ruwe commit-object narekenen, de handtekening eruit halen zoals git dat doet, en `ssh-keygen -Y verify -n git` tegen `/etc/notift/build-signers`. Het veld `verified` van GitHub wordt nergens gelezen |
+| 4 | idem | Goed: de database vragen of de commit al bekend is, en zo niet `dashboard.allow_signed_build_workflow` als `dashboard_build_signer` (alleen postgres, dus alleen root, is lid). Fout: een regel in het journaal (`journalctl -t notift-build-approve`) en een mail aan `NOTIFY_EMAIL` via de werker, een keer per versie, code en stand van de versie (onbekend, actief, ingetrokken; bij elke wissel van stand opnieuw) |
+
+**Alleen ondertekende versies op de lijst (Codex-audit 29).** Migratie 019 trekt de versies van voor 019 in (ze
+hebben geen ondertekenaar), en een check in de database houdt elke actieve versie ondertekend. Een `v1` die terugwijst
+naar zo'n oude commit geeft dus een weigering en een mail, en een build op die versie wordt niet aangenomen. Wat al
+draait blijft draaien en blijft terugrolbaar: de werker leest de versie van de release zelf, niet de lijst. De prijs:
+tussen migratie 019 en de eerste ondertekende release neemt het platform geen enkele build aan.
+
+**Een sleutel weghalen trekt niets in (Codex-audit 31).** De lijst is het verslag van de controle op het moment van
+vrijgeven, zoals bij GitHub een geverifieerde commit geverifieerd blijft als de sleutel later wordt ingetrokken. Zonder
+de sleutel in `build-signers` geeft de server niets nieuws meer vrij, maar wat al op de lijst stond blijft vrijgegeven en
+`receive_release` neemt er builds mee aan. Intrekken is een aparte handeling: `retire_build_workflow`. Wijst `v1` naar
+zo'n versie, dan weigert elke ronde (exit 1), met een tweede journaalregel `... blijft vrijgegeven: een weigering trekt
+een eerdere vrijgave niet in` en één mail "bouwversie ... blijft vrijgegeven, controle geweigerd (unknown_key)". Waarom
+zo: een intrekking komt via deze weg nooit terug, dus hoort ze niet vast aan het bewerken van een bestand. De prijs: bij
+een gelekte sleutel blijft wat die sleutel vrijgaf geldig tot je het intrekt (hieronder, "De Mac is kwijt", stap 2).
+
+**Wat dit niet tegenhoudt:** wie root is op `platform-01`, kan ook zonder handtekening in de database
+schrijven. Dat geldt voor elke controle op die machine; de handtekening beschermt tegen GitHub, de
+repo's, het dashboard en de werker, niet tegen root.
+
+**Een ingetrokken versie komt via deze weg nooit terug.** Terug naar een oude bouwlaag gaat met
+`restore-release.sh <oude commit in notift/build> --push v1`: dat zet precies de boom van die oude commit in een
+nieuwe, ondertekende commit, met dezelfde controle als `release.sh`. Niet met `release.sh` vanaf een oude
+hostingcommit: die van voor de ondertekende releases tekent niet, en een nieuwe `release.sh` op een oude
+`infra/build` stopt op de map `embed` (Codex-audit 29). Verplaats `v1` nooit met de hand naar een oude commit.
+
+### Sleutel wisselen (gepland)
+
+1. Nieuwe sleutel maken zoals bij de eenmalige stappen, met een nieuwe naam.
+2. De nieuwe publieke sleutel **erbij** in `infra/dashboard/build-signers` (twee regels), committen.
+3. `scp infra/dashboard/build-signers platform-01:`, dan in de sessie
+   `sudo bash /opt/notift-dashboard/install-approve-build.sh ~/build-signers`. Die controleert het bestand
+   en plaatst het pas daarna.
+4. In de git-config van `notift/build` `user.signingkey` naar de nieuwe sleutel, en een release doen.
+5. Pas daarna de oude regel weghalen en stap 3 herhalen. Wat met de oude sleutel is vrijgegeven, blijft
+   vrijgegeven (een sleutel weghalen trekt niets in). `v1` moet dan al op de release van stap 4 staan:
+   `approve-build.sh` controleert `v1` elke ronde, en een `v1` met de oude sleutel geeft na het weghalen
+   `unknown_key` en een mail "blijft vrijgegeven, controle geweigerd"; de versie blijft bruikbaar.
+
+### De Mac is kwijt (of de sleutel is misschien gelekt)
+
+1. **Eerst dicht voor nieuwe vrijgaven:** de oude regel uit `/etc/notift/build-signers` halen. Zonder sleutel
+   geeft de server niets nieuws meer vrij. **Dit trekt niets in:** wat de oude sleutel al vrijgaf, ook `v1`, blijft
+   vrijgegeven en neemt builds aan tot stap 2. Elke ronde meldt dan `unknown_key` voor `v1` (een mail per versie,
+   "blijft vrijgegeven"); dat is verwacht tot de release met de nieuwe sleutel. Kan dat niet via `ssh` (de serversleutel zat ook op
+   de Mac), dan via de console van Hetzner.
+2. Nagaan wat de oude sleutel vrijgaf sinds het verlies:
+   `select workflow_sha, added_at from dashboard.build_workflows where signer_fingerprint = '<oude SHA256>' order by added_at;`
+   en wat niet van Leon is intrekken met `retire_build_workflow`. Dit is de stap die een gelekte sleutel echt
+   dichtzet; stap 1 alleen doet dat niet.
+3. Op de nieuwe Mac: een nieuwe signeersleutel (eenmalige stappen), de publieke sleutel in
+   `infra/dashboard/build-signers` in plaats van de oude, committen, en installeren zoals bij de wissel.
+4. `sudo /opt/notift-dashboard/verify.sh platform-01` meet dat het bestand op de server gelijk is aan de
+   repo.
 
 ## Waarom er een `verify.sh` is voor deze laag
 

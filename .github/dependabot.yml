@@ -1,0 +1,13 @@
+# Wordt door release.sh gekopieerd naar .github/dependabot.yml van notift/build.
+# Alleen de action-pins van de gedeelde workflow. Het basisimage (docker) staat in de
+# bron, in deze repo, en wordt daar bijgehouden.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    groups:
+      actions:
+        patterns: ["*"]

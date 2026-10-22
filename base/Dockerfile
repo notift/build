@@ -10,7 +10,10 @@
 #   punt 4  een poort, een gezondheidspad, draait als gewone gebruiker, stopt netjes
 #   punt 8  architectuur amd64, want de machines zijn x86
 
-FROM nginx:1.29-alpine
+# nginx:1.29-alpine, vastgezet op de digest van de multi-arch index. Dependabot (docker) werkt hem bij.
+# Een nieuwe digest raakt de sites pas als het basisimage opnieuw gebouwd en in build-and-publish.yml
+# verwezen is (docs/07-bouwlaag.md, bevinding 6).
+FROM nginx:1.29-alpine@sha256:5616878291a2eed594aee8db4dade5878cf7edcb475e59193904b198d9b830de
 
 COPY nginx.conf /etc/nginx/nginx.conf
 
