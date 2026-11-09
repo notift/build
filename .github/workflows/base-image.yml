@@ -47,6 +47,15 @@ jobs:
       - name: De bouwlaag
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
+      - name: Expires van security.txt
+        # De builddatum plus 365 dagen, ISO 8601 in UTC (Leon, 19 oktober 2026). Niet meer met de hand.
+        id: securitytxt
+        run: |
+          set -euo pipefail
+          EXPIRES="$(sh base/security-txt.sh expires)"
+          echo "  ok   security.txt krijgt Expires $EXPIRES"
+          echo "expires=$EXPIRES" >> "$GITHUB_OUTPUT"
+
       - name: Inloggen bij ghcr.io
         uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
@@ -63,6 +72,7 @@ jobs:
           # Punt 8 van het contract: de machines zijn x86.
           platforms: linux/amd64
           tags: ghcr.io/notift/static-base:${{ steps.versie.outputs.value }}
+          build-args: SECURITY_TXT_EXPIRES=${{ steps.securitytxt.outputs.expires }}
 
       - name: Nakijken dat het image is wat het moet zijn
         # Geinstalleerd is niet actief, aanwezig is niet aangekomen. Dit haalt
@@ -71,6 +81,7 @@ jobs:
         # gezondheidspad dat antwoordt op een alleen-lezen bestandssysteem.
         env:
           DIGEST: ${{ steps.publiceren.outputs.digest }}
+          EXPIRES: ${{ steps.securitytxt.outputs.expires }}
         run: |
           set -euo pipefail
           IMAGE="ghcr.io/notift/static-base@$DIGEST"
@@ -156,6 +167,86 @@ jobs:
           verwacht /bestaatniet/         404 ""
           verwacht /bestaatniet.html     404 ""
           test "$fout" = 0
+
+          # security.txt van Notift (build 30). Ook als de klant een eigen .well-known levert. Expires is de
+          # datum die deze build zette (builddatum plus 365 dagen), en het vangnet blijft: nog minstens 180
+          # dagen, anders komt dit basisimage niet online (security-txt.sh check).
+          mkdir -p proefsite/.well-known
+          printf 'Contact: mailto:klant@example.invalid\n' > proefsite/.well-known/security.txt
+          docker build -q -t proefsite2 -f Proef.Dockerfile .
+          docker run -d --name proefsite2 --read-only --cap-drop ALL \
+            --tmpfs /tmp:rw,noexec,nosuid,size=16m -p 8082:8080 proefsite2
+          for i in $(seq 1 20); do
+            curl -s -o /dev/null http://127.0.0.1:8082/ && break
+            sleep 1
+          done
+          sec="$(curl -s -D - http://127.0.0.1:8082/.well-known/security.txt | tr -d '\r')"
+          printf '%s\n' "$sec" | head -1 | grep -q ' 200' || { echo "::error::security.txt geeft geen 200"; exit 1; }
+          printf '%s\n' "$sec" | grep -qix 'content-type: text/plain; charset=utf-8' || { echo "::error::security.txt is geen text/plain; charset=utf-8"; exit 1; }
+          printf '%s\n' "$sec" | grep -qx 'Contact: mailto:info@notift.nl' || { echo "::error::security.txt is niet die van Notift (het bestand van de klant won)"; exit 1; }
+          printf '%s\n' "$sec" | sed '1,/^$/d' > security-served.txt
+          test "$(sed -n 's/^Expires: //p' security-served.txt)" = "$EXPIRES" \
+            || { echo "::error::security.txt heeft niet de Expires van deze build ($EXPIRES)"; exit 1; }
+          sh base/security-txt.sh check security-served.txt || { echo "::error::security.txt komt niet door de controle (180 dagen)"; exit 1; }
+          echo "  ok   security.txt van Notift, utf-8, Expires van deze build"
+
+          # Redirects per pad (docs/07-bouwlaag.md): de map uit _redirects, op de plek waar site.Dockerfile hem zet,
+          # en de poort die in dit image zit (base/redirects-gate.sh: nginx -t en de include-eis). Dezelfde poort
+          # draait in site.Dockerfile; deze stap leest site.Dockerfile niet, zodat dit basisimage gepubliceerd en
+          # nagekeken kan worden voordat een sitebuild hem gebruikt (N27-06). Eerst de dichte deur: een kapotte map
+          # moet de build laten weigeren. Daarna de redirects zelf, de querystring, een redirect die wint van een
+          # bestaand bestand, en de bestaande regels ernaast.
+          printf '"/a" "/a 301 /contact"\n' > kapot.map
+          printf 'FROM %s\nCOPY kapot.map /etc/nginx/notift/redirects.map\nRUN sh /usr/local/lib/notift/redirects-gate.sh\n' "$IMAGE" > Proef4.Dockerfile
+          if docker build --progress=plain -t proefkapot -f Proef4.Dockerfile . > kapot.log 2>&1; then
+            echo "::error::de poort van dit image laat een kapotte map door"; exit 1
+          fi
+          # Om de goede reden: een ontbrekende poort of een andere fout mag hier niet als groen tellen.
+          grep -qF 'redirects: nginx -t is rood' kapot.log \
+            || { cat kapot.log; echo "::error::de build met een kapotte map faalde, maar niet in de poort"; exit 1; }
+          echo "  ok   een kapotte map: de poort in dit image weigert de build"
+          printf '/oud /contact\n/oud-map/ /map/ 308\n/klachten/rugpijn.html /klachten 302\n' > proefsite/_redirects
+          python3 checks/redirects.py generate proefsite redirects.map
+          rm -f proefsite/_redirects
+          printf 'FROM %s\nCOPY proefsite/ /usr/share/nginx/html/\nCOPY redirects.map /etc/nginx/notift/redirects.map\nRUN sh /usr/local/lib/notift/redirects-gate.sh && rm -rf /tmp/body /tmp/proxy /tmp/fastcgi /tmp/uwsgi /tmp/scgi\n' "$IMAGE" > Proef3.Dockerfile
+          docker build -q -t proefsite3 -f Proef3.Dockerfile .
+          docker run -d --name proefsite3 --read-only --cap-drop ALL \
+            --tmpfs /tmp:rw,noexec,nosuid,size=16m -p 8083:8080 proefsite3
+          for i in $(seq 1 20); do
+            curl -s -o /dev/null http://127.0.0.1:8083/ && break
+            sleep 1
+          done
+          fout=0
+          poort=8083
+          verwacht3() {
+            local pad="$1" code="$2" plek="$3" kop werkelijk
+            kop="$(curl -s -o /dev/null -D - "http://127.0.0.1:$poort$pad" | tr -d '\r')"
+            werkelijk="$(printf '%s\n' "$kop" | awk 'NR==1{print $2}') $(printf '%s\n' "$kop" | awk 'tolower($1)=="location:"{print $2}')"
+            if [ "$werkelijk" = "$code $plek" ]; then
+              echo "  ok   $pad geeft $code $plek"
+            else
+              echo "::error::$pad geeft '$werkelijk', verwacht '$code $plek'"; fout=1
+            fi
+          }
+          verwacht3 /oud                       301 /contact
+          verwacht3 /oud/                      301 /contact
+          verwacht3 "/oud?a=1&b=2"             301 "/contact?a=1&b=2"
+          verwacht3 /OUD                       404 ""
+          verwacht3 /oud-map                   308 /map/
+          verwacht3 /klachten/rugpijn.html     302 /klachten
+          verwacht3 /klachten/rugpijn          200 ""
+          verwacht3 /contact                   200 ""
+          verwacht3 /contact/                  301 /contact
+          verwacht3 /contact.html              301 /contact
+          verwacht3 /                          200 ""
+          verwacht3 /index.html                301 /
+          verwacht3 /bestaatniet               404 ""
+          test "$fout" = 0
+          # Zonder lijst: het basisimage zelf (proefsite, hierboven) stuurt niets door.
+          poort=8081
+          verwacht3 /oud                       404 ""
+          test "$fout" = 0
+          echo "  ok   redirects per pad: nginx -t, de include, de regels en de bestaande regels"
 
       - name: Wat je hierna nodig hebt
         env:

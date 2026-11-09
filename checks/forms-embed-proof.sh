@@ -120,6 +120,7 @@ port="$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); p
 mkdir -p "$WORK/nginx"
 sed -e "s#include       /etc/nginx/mime.types;#include       ${conf_dir}mime.types;#" \
     -e "s#root /usr/share/nginx/html;#root $s1;#" \
+    -e "s#/etc/nginx/notift/redirects.map#$BUILD/base/redirects.map#" \
     -e "s#listen 8080;#listen 127.0.0.1:$port;#" \
     -e "s#/tmp/#$WORK/nginx/#g" \
     -e "s#access_log    /dev/stdout combined;#access_log    $WORK/nginx/access.log combined;#" \

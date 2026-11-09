@@ -21,6 +21,23 @@ COPY nginx.conf /etc/nginx/nginx.conf
 # 404.html, dan overschrijft die deze.
 COPY 404.html /usr/share/nginx/html/404.html
 
+# security.txt van Notift (zie nginx.conf). Eigen map, niet in de webroot van de klant.
+# Expires zet de build: de builddatum plus 365 dagen, als build-arg uit base-image.yml (Leon, 19 oktober 2026).
+# Zonder geldige waarde faalt de build; security-txt.sh is de enige render, ook voor de proef.
+ARG SECURITY_TXT_EXPIRES
+COPY security.txt security-txt.sh /tmp/notift-security/
+RUN mkdir -p /etc/nginx/notift \
+ && sh /tmp/notift-security/security-txt.sh render /tmp/notift-security/security.txt "$SECURITY_TXT_EXPIRES" > /etc/nginx/notift/security.txt \
+ && grep -qx "Expires: $SECURITY_TXT_EXPIRES" /etc/nginx/notift/security.txt \
+ && rm -rf /tmp/notift-security
+
+# Redirects per pad: een lege lijst. De build van een site zet hier de map uit zijn _redirects
+# (checks/redirects.py, site.Dockerfile); nginx.conf laadt hem binnen een map-blok.
+# De poort (redirects-gate.sh) zit in hetzelfde image: base-image.yml en site.Dockerfile draaien hem, en een
+# sitebuild op een basisimage van voor de redirects stopt omdat hij ontbreekt (N27-06, 22 oktober 2026).
+COPY redirects.map /etc/nginx/notift/redirects.map
+COPY redirects-gate.sh /usr/local/lib/notift/redirects-gate.sh
+
 # Het entrypoint van de officiele nginx-image wordt bewust overgeslagen: dat
 # schrijft naar /etc, en dat kan niet op een alleen-lezen bestandssysteem.
 USER nginx

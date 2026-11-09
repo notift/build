@@ -1,0 +1,3 @@
+Contact: mailto:info@notift.nl
+Expires: @EXPIRES@
+Preferred-Languages: nl, en
