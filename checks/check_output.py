@@ -21,6 +21,11 @@ import re
 import sys
 from html.parser import HTMLParser
 
+# Geen __pycache__ naast de bouwlaag: release.sh kopieert checks/ als geheel naar notift/build.
+sys.dont_write_bytecode = True
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import redirects  # noqa: E402  (naast dit script, in de bouwlaag)
+
 # ---------------------------------------------------------------------------
 # Grenzen. Voorlopige waarden, bij te stellen zodra er echte sites doorheen gaan.
 
@@ -409,6 +414,23 @@ def controleer_vorm(root, b):
                 b.weiger("een bestand dat geen gewoon bestand is", os.path.relpath(pad, root))
 
 
+def controleer_redirects(root, b):
+    """Redirects per pad: een fout in _redirects weigert de build (besluit 106, docs/07-bouwlaag.md)."""
+    _, fouten, waarschuwingen = redirects.keur_site(root)
+    for f in fouten:
+        b.weiger(str(f))
+    for w in waarschuwingen:
+        b.waarschuw(str(w))
+
+
+def annoteer(soort, tekst):
+    """Een GitHub-annotatie: de reden staat dan bovenaan de run. De mail van GitHub over de mislukte run
+    gaat naar wie pushte en linkt naar de run (besluit 106)."""
+    if os.environ.get("GITHUB_ACTIONS") == "true":
+        tekst = tekst.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
+        print(f"::{soort} title=Controle van de uitvoer::{tekst}")
+
+
 def main():
     if len(sys.argv) == 3 and sys.argv[1] == "--github-output":
         github_output(sys.argv[2])
@@ -430,6 +452,7 @@ def main():
     controleer_html(root, manifest["searchable"], b)
     controleer_geheimen(root, manifest["allowed_public_keys"], b)
     controleer_omvang(root, b)
+    controleer_redirects(root, b)
 
     print(f"\n== Controle van {root} ==")
     print(f"  project {manifest['project']}, gevonden worden: "
@@ -444,6 +467,7 @@ def main():
         print(f"\n  {len(b.weigeringen)} reden(en) om niet te publiceren:")
         for wat, waar in b.weigeringen:
             print(f"    FOUT    {wat}" + (f"  [{waar}]" if waar else ""))
+            annoteer("error", wat + (f"  [{waar}]" if waar else ""))
         print("\n  Er wordt niets gepubliceerd.\n")
         return 1
 

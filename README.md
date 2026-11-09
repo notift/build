@@ -25,6 +25,10 @@ build wordt weggegooid. Wat hij aflevert is een image op `ghcr.io` dat het artef
 | `checks/check-private-image-proof.sh` | Tegenproef voor doel 3: publiek rood en privaat groen op dezelfde meting |
 | `embed/forms.js` | Het formulierscript. Job 2 zet het in elk site-image op `/_notift/embed/forms.js`, over wat de klant daar neerzette (`docs/11-formulieren.md`, build 23) |
 | `checks/forms-embed-proof.sh` | Draait die stap uit de workflow tegen een geplant script en meet het resultaat met de nginx.conf van het basisimage |
+| `checks/redirects.py` | Redirects per pad: keurt `_redirects` van een site en maakt er de nginx-map van. Zie "Redirects per pad" hieronder |
+| `checks/redirects-proof.sh` | Elke foutsoort weigert met de regel erbij, en de goede gevallen gemeten met de nginx.conf van het basisimage |
+| `base/redirects.map` | De lege lijst van het basisimage. De build van een site zet er zijn eigen map overheen |
+| `base/redirects-gate.sh` | De poort in het basisimage: `nginx -t` en de eis dat `nginx.conf` de map laadt. Draait in `base-image.yml` en `site.Dockerfile` |
 | `workflow/build-and-publish.yml` | De herbruikbare workflow die elk project aanroept. Twee jobs, en dat is een grens |
 | `workflow/base-image.yml` | Het basisimage bouwen en publiceren. Met de hand te starten, niet vanzelf |
 | `notift.example.json` | Het manifest dat in de repo van een project komt |
@@ -36,6 +40,7 @@ build wordt weggegooid. Wat hij aflevert is een image op `ghcr.io` dat het artef
 ./checks/check-private-image-proof.sh                publieke en private tegenproef voor de afschermingsmeting
 ./checks/build-layer-proof.sh                         manifestinjectie, vaste hash en werkmapgrens
 ./checks/forms-embed-proof.sh                         het formulierscript komt uit de bouwlaag, niet van de klant
+./checks/redirects-proof.sh                           redirects per pad: elke foutsoort rood, de goede gevallen in nginx
 ./checks/release-signing-proof.sh <map>               release.sh en restore-release.sh pushen alleen een ondertekende commit
 python3 checks/check_output.py dist notift.json      een echte uitvoer keuren
 ./release.sh                                         tonen wat er naar notift/build zou gaan
@@ -235,11 +240,51 @@ de module hoort, dat package en module exact overeenkomen, en dat `ref` precies
 controleren, naast de bestaande label- en identiteitscontrole. Labels alleen zijn verklaringen van
 de bouwer, geen bewijs. Deze ronde bouwt die runtime- en platformcontroles bewust niet.
 
+## Redirects per pad
+
+Een site kan oude adressen doorsturen met een bestand `_redirects` in zijn uitvoermap (bij Vite of Astro:
+`public/_redirects`). Het formaat is een strikte deelverzameling van `_redirects` van Netlify:
+
+```
+# Oude adressen van de vorige site
+/oude-pagina           /nieuwe-pagina
+/diensten/fysio.html   /fysiotherapie      308
+/elders                https://example.org/pad   302
+```
+
+| | |
+|---|---|
+| Een regel | `bron bestemming [301\|302\|307\|308]`, standaard 301. `#` aan het begin is commentaar |
+| De bron | Een exact pad. Een slash aan het eind telt niet (`/oud` vangt ook `/oud/`), hoofdletters wel. Tekens buiten ASCII als `%XX` |
+| De bestemming | Een pad op de site dat zonder tweede stap 200 geeft (dus `/contact`, niet `/contact.html` of `/contact/`), of een volledige URL |
+| De querystring | Die van het verzoek gaat mee: `/oud?utm=x` wordt `/nieuw?utm=x` |
+| Voorrang | Een redirect wint van een bestaand bestand. De build waarschuwt dan wel |
+| Kan nog niet | Wildcards (`*`), placeholders (`:naam`), voorwaarden, een querystring in bron of bestemming, `301!`. Dat geeft een fout met de reden |
+
+**Een fout weigert de build** (besluit 106, `docs/07-bouwlaag.md`), met de regel in de melding en als annotatie in de
+run. De site blijft op de vorige versie. Een fout is: een regel die niet te lezen is, een onbekende statuscode, een
+dubbele bron (ook via de slash of alleen in hoofdletters), een ketting of lus, een bron `/`, `/index.html` of een pad
+dat het platform zelf bedient (`/_health`, `/_notift/`, `/.well-known/`, `/404.html`), een bestemming die niet
+bestaat of eerst nog door de slash- of `.html`-regel moet, en een rode `nginx -t`.
+
+Hoe het loopt: `check_output.py` keurt het bestand in beide jobs; job 2 maakt er met `redirects.py generate` een
+nginx-map van naast de Dockerfile en haalt `_redirects` uit de site; `site.Dockerfile` zet de map in het image en
+draait de poort uit het basisimage (`base/redirects-gate.sh`, vanaf basisimage 7): `nginx -t`, plus de eis dat
+`nginx.conf` de map werkelijk laadt. Op een ouder basisimage stopt de build met die reden. In nginx: op serverniveau,
+voor elke `location`, op het pad uit `$request_uri`.
+
+**Wie de fout ziet** (besluit 106): wie pushte krijgt de mail van GitHub over de mislukte run, als meldingen voor
+Actions aan staan; de foute regel staat als annotatie bovenaan die run.
+
+Vóór de DNS-omzet van een site: `bash infra/runtime/redirects-check.sh <hostnaam> <pad naar _redirects>` meet elke
+regel op `web-01` (in de hostingrepo, niet in `notift/build`).
+
 ## Wat weigert en wat waarschuwt
 
 **Weigert:** geen uitvoermap of geen `index.html`, een pagina zonder zichtbare tekst terwijl hij
 gevonden moet worden, een pagina zonder titel, een `.env` in de uitvoer, een geheime sleutel, een
-`service_role`-sleutel, een publieke sleutel die niet in het manifest staat, en een privesleutel.
+`service_role`-sleutel, een publieke sleutel die niet in het manifest staat, een privesleutel, en een fout
+in `_redirects`. Op GitHub staat elke weigering ook als annotatie bovenaan de run.
 
 **Waarschuwt:** een afbeelding boven een half MB, meer dan 300 KB JavaScript, een gepubliceerde
 bronkaart, een verwijzing naar een bestand dat niet bestaat, en een ontbrekende omschrijving, kop
@@ -279,7 +324,7 @@ en stopt met een fout als `gh` niet beschikbaar of niet ingelogd is.
 |---|---|---|
 | 1 | ~~Een repo `notift/build` aanmaken met een tag `v1`~~ **Gedaan 2026-09-04.** **Publiek**, want een projectrepo kan een prive workflow-repo niet uitchecken. `v1` staat en publiceren gaat met `release.sh`. **Er komt nooit iets in deze repo dat niet openbaar mag zijn** | GitHub |
 | 2 | ~~Elke `uses:` vastzetten op een commit-hash~~ **Gedaan 2026-09-04.** Alle vier de actions staan vast op een hash, met de versie als commentaar erachter. Meteen ook naar de actuele hoofdversie, want alle vier stonden een major achter en draaien nu op node24. Nagekeken dat elke invoerwaarde die wij gebruiken daar nog bestaat | `workflow/build-and-publish.yml` |
-| 3 | ~~Het basisimage publiceren~~ **Gedaan 2026-09-04.** Staat sinds 1 oktober op **versie 6**, digest `sha256:64f027ff`: `$uri.html` voor `$uri/`, want een pagina naast een map van dezelfde naam liep in een lus. Versie 5 (`sha256:2cc3dd81`, 24 september) bracht doorverwijzingen zonder de interne poort, en een 301 voor een slash aan het eind en voor `.html`. Versie 4 (`sha256:a36a47e5`) stuurde `/` in een lus naar zichzelf en is vervangen. Versie 3 (`sha256:31bcdc43`) was de eerste die werkelijk van de organisatie is. Versie 1 en 2 zijn weg: die hoorden bij het gebruikersaccount en hielden de naam bezet. Nagemeten op het gepubliceerde image: geen root, poort 8080, `/_health` antwoordt vanuit een alleen-lezen container, en een niet-bestaande pagina geeft 404 en geen 200 | Eenmalig |
+| 3 | ~~Het basisimage publiceren~~ **Gedaan 2026-09-04.** Staat sinds 9 november op **versie 7**, digest `sha256:cbd5b0ac`: de poort en de map voor redirects per pad, en `security.txt` met `Expires` uit de build. Versie 6 (`sha256:64f027ff`, 1 oktober): `$uri.html` voor `$uri/`, want een pagina naast een map van dezelfde naam liep in een lus. Versie 5 (`sha256:2cc3dd81`, 24 september) bracht doorverwijzingen zonder de interne poort, en een 301 voor een slash aan het eind en voor `.html`. Versie 4 (`sha256:a36a47e5`) stuurde `/` in een lus naar zichzelf en is vervangen. Versie 3 (`sha256:31bcdc43`) was de eerste die werkelijk van de organisatie is. Versie 1 en 2 zijn weg: die hoorden bij het gebruikersaccount en hielden de naam bezet. Nagemeten op het gepubliceerde image: geen root, poort 8080, `/_health` antwoordt vanuit een alleen-lezen container, en een niet-bestaande pagina geeft 404 en geen 200 | Eenmalig |
 | 4 | ~~Het deployeraccount en het token~~ **Gedaan 2026-09-04.** `notift-deploy` is **lid van de organisatie** met Read op het pakket `prj_00001`. Lid worden was nodig omdat een organisatie pakkettoegang alleen aan leden en teams geeft. Het kan alleen veilig doordat de standaardrechten van de organisatie op `none` staan, anders had dit account leesrecht op elke repo gekregen. Het token staat in `/root/.docker/config.json` op `web-01` en `platform-01` en **verloopt op 2026-12-03**. Vernieuwen: `token-renewal.md`. Per nieuw project moet de pakkettoegang opnieuw gegeven worden, en daar is geen API voor | GitHub plus de machine |
 | 5 | Per project een `notift.json` en een workflow van drie regels die de onze aanroept. Zie `notift/testsite` als voorbeeld dat werkt | Per klant |
 

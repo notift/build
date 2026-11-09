@@ -250,6 +250,19 @@ jobs:
           MANIFEST_PATH: ${{ inputs.manifest }}
         run: python3 "$BUILD_LAYER_DIR/checks/check_output.py" .notift-context/site "$MANIFEST_PATH"
 
+      - name: De redirects van de site
+        # Redirects per pad (docs/07-bouwlaag.md). _redirects in de uitvoer wordt een nginx-map naast de
+        # Dockerfile; site.Dockerfile zet hem in het image en draait de poort uit het basisimage (nginx -t en de
+        # include-eis, base/redirects-gate.sh). Een fout weigert de build met
+        # de regel erbij (check_output.py hierboven weigerde al, met dezelfde parser). Zonder _redirects is de
+        # map leeg. Het bestand zelf wordt niet geserveerd, zoals bij Netlify en Cloudflare Pages.
+        env:
+          BUILD_LAYER_DIR: ${{ runner.temp }}/notift-build
+        run: |
+          set -euo pipefail
+          python3 "$BUILD_LAYER_DIR/checks/redirects.py" generate .notift-context/site .notift-context/redirects.map
+          rm -f .notift-context/site/_redirects
+
       - name: Het formulierscript van het platform
         # The forms script comes from this build layer at the pinned hash, never from the customer
         # and never from the dashboard at run time. /_notift/ is reserved: whatever the customer
@@ -317,7 +330,7 @@ jobs:
           # hierboven, want daarbinnen wordt het als een parameter meegegeven.
           # Dat is een keer gebeurd en het viel pas op in de log van een run.
           build-args: |
-            BASE=ghcr.io/notift/static-base@sha256:64f027ffbac7d0204ded361954e423bd075c0b88f1b6bb57749acccae8812c83
+            BASE=ghcr.io/notift/static-base@sha256:cbd5b0ac32eb37761e9f8135d0c6ed5e199de331d0436c748f5805ba78938dbd
             BUILD=${{ needs.bouwen.outputs.build }}
             ORGANISATION=${{ needs.bouwen.outputs.organisation }}
             PROJECT=${{ needs.bouwen.outputs.project }}
