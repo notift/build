@@ -25,6 +25,13 @@
 # artefact komt uit een job waar vreemde code in draaide, dus alles eruit is
 # invoer en geen configuratie.
 #
+# Job 2 neemt van job 1 alleen het artefact en de vlag `go`, en vertrouwt geen van
+# beide. Welke bouwlaagcode draait (job.workflow_sha), het manifest, het
+# beleid, module, pakket, plan en buildnummer bepaalt job 2 zelf, uit de context
+# van GitHub en alleen het manifest van de exacte commit. Het artefact is een gewoon tar-bestand
+# dat job 2 zelf begrensd uitpakt, keurt (ook de Lovable-keuring) en tot een
+# eigen bouwcontext samenstelt. Zie "Waarom twee jobs" in de README.
+#
 # Waarom opnieuw keuren: het artefact is de brug tussen de twee jobs. Wat er in
 # job 1 gekeurd is, hoeft niet te zijn wat er in job 2 uit komt.
 #
@@ -48,6 +55,13 @@ on:
         description: "Pad naar het manifest in de repo van het project"
         type: string
         default: "notift.json"
+      policy:
+        # Notift policy, set in the caller workflow, which the repo protects (README, "Lovable-projecten").
+        # Empty: the manifest decides, as for every site before this input. 'lovable-on-request': the
+        # manifest must say profile lovable, only workflow_dispatch builds, and build.trigger is ignored.
+        description: "Beleid van Notift voor deze repo: leeg, of lovable-on-request"
+        type: string
+        default: ""
     secrets:
       NOTIFT_DEPLOY_SECRET:
         description: "HMAC-geheim van de gekoppelde repository"
@@ -61,7 +75,7 @@ on:
         value: ${{ jobs.publiceren.outputs.image }}
       build:
         description: "Het buildnummer: datum plus commit"
-        value: ${{ jobs.bouwen.outputs.build }}
+        value: ${{ jobs.publiceren.outputs.build }}
       module:
         description: "De module waartoe het image hoort"
         value: ${{ jobs.publiceren.outputs.module }}
@@ -103,35 +117,42 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
+    # One build per module and event at a time. A newer request replaces a waiting one; a push never
+    # replaces a waiting request, because the event is part of the group.
+    concurrency:
+      group: notift-build-${{ github.repository }}-${{ inputs.manifest }}-${{ github.event_name }}
+      cancel-in-progress: false
     outputs:
-      build: ${{ steps.nummer.outputs.build }}
-      organisation: ${{ steps.manifest.outputs.organisation }}
-      project: ${{ steps.manifest.outputs.project }}
-      module: ${{ steps.manifest.outputs.module }}
-      plan: ${{ steps.manifest.outputs.plan }}
-      package: ${{ steps.manifest.outputs.package }}
-      workflow: ${{ steps.bouwlaag.outputs.sha }}
+      # Only this flag goes to job 2, and job 2 decides again on its own.
+      go: ${{ steps.moment.outputs.go }}
 
     steps:
       - name: De repo van het project
+        # Credentials stay in .git/config here (contents: read on this repo only), for the
+        # lovable-sync lookup. Job 2 does not keep them.
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - name: De vaste bouwlaag bepalen
+      - name: De vaste bouwlaag ophalen
         id: bouwlaag
-        # Buiten GITHUB_WORKSPACE: een klantbuild die alles naar dist kopieert
-        # kan deze map niet meenemen. v1 wordt precies eenmaal naar een hash
-        # opgelost; job 2 haalt daarna die hash op, nooit v1 opnieuw.
+        # The build layer is the commit of this very workflow file (job.workflow_sha), from GitHub's own
+        # context: whatever the caller pinned (@v1 or a hash). Buiten GITHUB_WORKSPACE, zodat een
+        # klantbuild die alles naar dist kopieert deze map niet kan meenemen.
         env:
           BUILD_LAYER_DIR: ${{ runner.temp }}/notift-build
+          WORKFLOW_REPOSITORY: ${{ job.workflow_repository }}
+          WORKFLOW_SHA: ${{ job.workflow_sha }}
         run: |
           set -euo pipefail
-          SHA="$(git ls-remote https://github.com/notift/build.git 'refs/tags/v1^{}' | awk 'NR==1 {print $1}')"
-          [[ "$SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::v1 van notift/build kon niet naar een commit worden opgelost"; exit 1; }
-          git clone --quiet --no-checkout https://github.com/notift/build.git "$BUILD_LAYER_DIR"
-          git -C "$BUILD_LAYER_DIR" checkout --quiet --detach "$SHA"
-          ACTUAL="$(git -C "$BUILD_LAYER_DIR" rev-parse HEAD)"
-          test "$ACTUAL" = "$SHA" || { echo "::error::bouwlaag wees na checkout naar $ACTUAL, verwacht $SHA"; exit 1; }
-          echo "sha=$SHA" >> "$GITHUB_OUTPUT"
+          [ "$WORKFLOW_REPOSITORY" = notift/build ] || { echo "::error::deze workflow hoort uit notift/build te komen, niet uit '$WORKFLOW_REPOSITORY'"; exit 1; }
+          [[ "$WORKFLOW_SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::GitHub gaf geen commit van de bouwlaag (job.workflow_sha)"; exit 1; }
+          [ ! -e "$BUILD_LAYER_DIR" ] || { echo "::error::$BUILD_LAYER_DIR bestaat al"; exit 1; }
+          git init --quiet "$BUILD_LAYER_DIR"
+          git -C "$BUILD_LAYER_DIR" remote add origin "https://github.com/$WORKFLOW_REPOSITORY.git"
+          git -C "$BUILD_LAYER_DIR" fetch --quiet --depth=1 origin "$WORKFLOW_SHA"
+          git -C "$BUILD_LAYER_DIR" checkout --quiet --detach FETCH_HEAD
+          ACTUAL_SHA="$(git -C "$BUILD_LAYER_DIR" rev-parse HEAD)"
+          test "$ACTUAL_SHA" = "$WORKFLOW_SHA" || { echo "::error::bouwlaag wees na checkout naar $ACTUAL_SHA, verwacht $WORKFLOW_SHA"; exit 1; }
+          echo "sha=$WORKFLOW_SHA" >> "$GITHUB_OUTPUT"
 
       - name: Het manifest lezen
         id: manifest
@@ -141,33 +162,61 @@ jobs:
         run: |
           set -euo pipefail
           test -f "$MANIFEST_PATH" || { echo "::error::$MANIFEST_PATH ontbreekt in deze repo. Zie de README van de bouwlaag."; exit 1; }
-          python3 "$BUILD_LAYER_DIR/checks/check_output.py" --github-output "$MANIFEST_PATH" >> "$GITHUB_OUTPUT"
+          python3 -I "$BUILD_LAYER_DIR/checks/check_output.py" --github-output "$MANIFEST_PATH" >> "$GITHUB_OUTPUT"
 
-      - name: Het buildnummer
-        id: nummer
-        # Datum plus commit, doel 5. Geen volgnummer van GitHub: dat begint
-        # opnieuw als een repo verhuist, en bij DWY ligt het bij de klant.
-        run: echo "build=$(date -u +%Y%m%d-%H%M)-$(git rev-parse --short=7 HEAD)" >> "$GITHUB_OUTPUT"
+      - name: Bouwen we nu
+        id: moment
+        # The same rules as job 2 (checks/publish_policy.py): only refs/heads/main, only push and
+        # workflow_dispatch, on request only workflow_dispatch, and the caller's policy over the manifest.
+        # A run that may not publish is green and builds nothing; a policy that contradicts the manifest
+        # is red. Job 2 checks all of it again and refuses instead of skipping.
+        env:
+          BUILD_LAYER_DIR: ${{ runner.temp }}/notift-build
+          MANIFEST_PATH: ${{ inputs.manifest }}
+          POLICY: ${{ inputs.policy }}
+          EVENT: ${{ github.event_name }}
+          REF: ${{ github.ref }}
+        run: python3 -I "$BUILD_LAYER_DIR/checks/publish_policy.py" gate "$GITHUB_WORKSPACE" "$MANIFEST_PATH" >> "$GITHUB_OUTPUT"
+
+      - name: Werk van Lovable naast main
+        # Before any client code runs, so a build cannot hide it. Warns, never fails.
+        if: steps.moment.outputs.go == 'true'
+        env:
+          BUILD_LAYER_DIR: ${{ runner.temp }}/notift-build
+        run: bash "$BUILD_LAYER_DIR/checks/warn_lovable_sync.sh" "$GITHUB_WORKSPACE"
 
       - name: Node
+        if: steps.moment.outputs.go == 'true'
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: ${{ steps.manifest.outputs.node }}
-          cache: ${{ steps.manifest.outputs.manager }}
+          # Empty for bun: setup-node has no bun cache, and then caching is off.
+          cache: ${{ steps.manifest.outputs.cache }}
+
+      - name: Bun
+        # Exact version from the manifest, never latest. No cache: a cache the client can steer is a
+        # bridge, and the binary is small. Vastgezet 2026-11-25 (v2.2.0, published 2026-03-14).
+        if: steps.moment.outputs.go == 'true' && steps.manifest.outputs.manager == 'bun'
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: ${{ steps.manifest.outputs.bun }}
+          no-cache: true
 
       - name: Pakketten installeren
+        # Frozen lockfile always. Install scripts of dependencies only as the manifest allows
+        # (checks/install_deps.sh): mode none by default, named only for packages on Notift's list,
+        # legacy-all only for a static site whose manifest predates the field. Mode and packages travel
+        # as two values, so a package name can never be read as a mode.
+        if: steps.moment.outputs.go == 'true'
         env:
+          BUILD_LAYER_DIR: ${{ runner.temp }}/notift-build
           MANAGER: ${{ steps.manifest.outputs.manager }}
-        run: |
-          set -euo pipefail
-          case "$MANAGER" in
-            npm)  npm ci ;;
-            pnpm) corepack enable && pnpm install --frozen-lockfile ;;
-            yarn) corepack enable && yarn install --immutable ;;
-            *)    echo "::error::onbekende pakketmanager"; exit 1 ;;
-          esac
+          INSTALL_MODE: ${{ steps.manifest.outputs.install_mode }}
+          INSTALL_PACKAGES: ${{ steps.manifest.outputs.install_packages }}
+        run: bash "$BUILD_LAYER_DIR/checks/install_deps.sh"
 
       - name: Bouwen
+        if: steps.moment.outputs.go == 'true'
         env:
           BUILD_COMMAND: ${{ steps.manifest.outputs.command }}
         run: |
@@ -175,80 +224,224 @@ jobs:
           read -r -a COMMAND <<< "$BUILD_COMMAND"
           "${COMMAND[@]}"
 
-      - name: De uitvoer keuren
-        # Doel 4. Weigeren op wat SEO of veiligheid breekt, waarschuwen op de
-        # rest. Dit kijkt naar wat er werkelijk uit de build kwam en raadt niets
-        # uit de broncode. Job 2 doet dit nog een keer.
+      - name: Alleen de uitvoermap klaarzetten
+        # Only build.output leaves this job. It is copied to a fresh folder outside the repo: .output/server
+        # or anything else beside the output folder is never read. Symlinks out of the folder, directory
+        # symlinks, hardlinks and special files are refused. Hidden paths stay behind except .well-known/.
+        if: steps.moment.outputs.go == 'true'
         env:
           BUILD_LAYER_DIR: ${{ runner.temp }}/notift-build
           BUILD_OUTPUT: ${{ steps.manifest.outputs.output }}
+          STAGE_DIR: ${{ runner.temp }}/notift-site
+        run: python3 -I "$BUILD_LAYER_DIR/checks/stage_output.py" "$GITHUB_WORKSPACE" "$BUILD_OUTPUT" "$STAGE_DIR"
+
+      - name: De uitvoer keuren
+        # Doel 4. Weigeren op wat SEO of veiligheid breekt, waarschuwen op de
+        # rest. Dit kijkt naar wat er werkelijk uit de build kwam en raadt niets
+        # uit de broncode. Job 2 doet dit nog een keer, op zijn eigen kopie. Hier
+        # is het snelle terugkoppeling voor een eerlijke build, geen grens.
+        if: steps.moment.outputs.go == 'true'
+        env:
+          BUILD_LAYER_DIR: ${{ runner.temp }}/notift-build
+          STAGE_DIR: ${{ runner.temp }}/notift-site
           MANIFEST_PATH: ${{ inputs.manifest }}
-        run: python3 "$BUILD_LAYER_DIR/checks/check_output.py" "$BUILD_OUTPUT" "$MANIFEST_PATH"
+        run: python3 -I "$BUILD_LAYER_DIR/checks/check_output.py" "$STAGE_DIR" "$MANIFEST_PATH"
+
+      - name: De Lovable-keuring
+        # Profile lovable only. The source checks and the required routes run here only: this job holds no
+        # publish token. Job 2 runs the output checks again on the tree that goes to Docker, and never opens
+        # the client's source tree (audit 2, finding N1).
+        if: steps.moment.outputs.go == 'true' && steps.manifest.outputs.profile == 'lovable'
+        env:
+          BUILD_LAYER_DIR: ${{ runner.temp }}/notift-build
+          STAGE_DIR: ${{ runner.temp }}/notift-site
+        run: python3 -I "$BUILD_LAYER_DIR/checks/check_lovable.py" --source "$GITHUB_WORKSPACE" --output "$STAGE_DIR"
+
+      - name: De overdracht inpakken
+        # One plain tar of regular files and directories: upload-artifact neither zips nor follows links,
+        # and job 2 unpacks it itself, bounded (checks/transfer.py).
+        if: steps.moment.outputs.go == 'true'
+        env:
+          BUILD_LAYER_DIR: ${{ runner.temp }}/notift-build
+          STAGE_DIR: ${{ runner.temp }}/notift-site
+          TRANSFER_DIR: ${{ runner.temp }}/notift-transfer
+        run: |
+          set -euo pipefail
+          mkdir -m 0700 "$TRANSFER_DIR"
+          python3 -I "$BUILD_LAYER_DIR/checks/transfer.py" pack "$STAGE_DIR" "$TRANSFER_DIR/site.tar"
 
       - name: Het resultaat doorgeven
+        if: steps.moment.outputs.go == 'true'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: site
-          path: ${{ steps.manifest.outputs.output }}
+          # archive: false uploads the one file as is; its name, site.tar, is the artifact name.
+          path: ${{ runner.temp }}/notift-transfer/site.tar
+          archive: false
           # Hier staat gebouwde code van een klant in. Zo kort mogelijk bewaren.
           retention-days: 1
           if-no-files-found: error
 
   # ---------------------------------------------------------------------------
   # Job 2: hier draait geen code van de klant. Alleen hier ligt het token.
+  # Van job 1 komt alleen het artefact en de vlag go; beide zijn onbetrouwbaar.
   # ---------------------------------------------------------------------------
   publiceren:
     needs: bouwen
+    # Saves a runner when job 1 decided not to build. Not a check: the policy step below decides again.
+    if: needs.bouwen.outputs.go == 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: read
       packages: write
+    # One publication per module at a time; a newer one replaces a waiting one. The order of tags no
+    # longer matters (each run has its own), and the platform takes the digest.
+    concurrency:
+      group: notift-publish-${{ github.repository }}-${{ inputs.manifest }}
+      cancel-in-progress: false
     outputs:
       digest: ${{ steps.publiceren.outputs.digest }}
       image: ${{ steps.referentie.outputs.image }}
-      module: ${{ needs.bouwen.outputs.module }}
-      project: ${{ needs.bouwen.outputs.project }}
-      package: ${{ needs.bouwen.outputs.package }}
+      build: ${{ steps.beleid.outputs.build }}
+      module: ${{ steps.beleid.outputs.module }}
+      project: ${{ steps.beleid.outputs.project }}
+      package: ${{ steps.beleid.outputs.package }}
       repository: ${{ steps.herkomst.outputs.repository }}
       ref: ${{ steps.herkomst.outputs.ref }}
       commit: ${{ steps.herkomst.outputs.commit }}
-      workflow: ${{ needs.bouwen.outputs.workflow }}
+      workflow: ${{ steps.bouwlaag.outputs.sha }}
       run_id: ${{ steps.herkomst.outputs.run_id }}
       run_attempt: ${{ steps.herkomst.outputs.run_attempt }}
 
     steps:
-      - name: De repo van het project
-        # Alleen voor het manifest, en met opzet vers in plaats van via het
-        # artefact. Wat door job 1 heen komt is aangeraakt door de klant.
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-
-      - name: Dezelfde vaste bouwlaag ophalen
+      - name: De vaste bouwlaag ophalen
+        id: bouwlaag
+        # Same block as in job 1, from GitHub's job context and never from job 1's outputs.
         env:
           BUILD_LAYER_DIR: ${{ runner.temp }}/notift-build
-          EXPECTED_SHA: ${{ needs.bouwen.outputs.workflow }}
+          WORKFLOW_REPOSITORY: ${{ job.workflow_repository }}
+          WORKFLOW_SHA: ${{ job.workflow_sha }}
         run: |
           set -euo pipefail
-          [[ "$EXPECTED_SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::job 1 gaf geen geldige bouwlaaghash door"; exit 1; }
+          [ "$WORKFLOW_REPOSITORY" = notift/build ] || { echo "::error::deze workflow hoort uit notift/build te komen, niet uit '$WORKFLOW_REPOSITORY'"; exit 1; }
+          [[ "$WORKFLOW_SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::GitHub gaf geen commit van de bouwlaag (job.workflow_sha)"; exit 1; }
+          [ ! -e "$BUILD_LAYER_DIR" ] || { echo "::error::$BUILD_LAYER_DIR bestaat al"; exit 1; }
           git init --quiet "$BUILD_LAYER_DIR"
-          git -C "$BUILD_LAYER_DIR" remote add origin https://github.com/notift/build.git
-          git -C "$BUILD_LAYER_DIR" fetch --quiet --depth=1 origin "$EXPECTED_SHA"
+          git -C "$BUILD_LAYER_DIR" remote add origin "https://github.com/$WORKFLOW_REPOSITORY.git"
+          git -C "$BUILD_LAYER_DIR" fetch --quiet --depth=1 origin "$WORKFLOW_SHA"
           git -C "$BUILD_LAYER_DIR" checkout --quiet --detach FETCH_HEAD
           ACTUAL_SHA="$(git -C "$BUILD_LAYER_DIR" rev-parse HEAD)"
-          test "$ACTUAL_SHA" = "$EXPECTED_SHA" || { echo "::error::bouwlaaghash wijkt af: $ACTUAL_SHA, verwacht $EXPECTED_SHA"; exit 1; }
+          test "$ACTUAL_SHA" = "$WORKFLOW_SHA" || { echo "::error::bouwlaag wees na checkout naar $ACTUAL_SHA, verwacht $WORKFLOW_SHA"; exit 1; }
+          echo "sha=$WORKFLOW_SHA" >> "$GITHUB_OUTPUT"
+
+      - name: Alleen het manifest van het project
+        # This job holds packages: write, so no client source file ever lands here (audit 3, finding N1): only
+        # the manifest blob of the exact caller commit, read by publish_policy.py and check_output.py, never run.
+        # The commit and its trees come without any blob; then only the manifest blob, if it is a plain file
+        # (no link, no submodule) of at most 64 KiB. Every file git writes for that blob is capped at 256 KiB
+        # (ulimit), so a larger blob breaks off its own download. The token lives only in the environment of
+        # these git calls, never in a file or an argument, and the object store is removed afterwards.
+        # Fail closed on the filter (audit 3b, N1): a server that ignores or lacks blob:none only warns and sends
+        # every blob, so the step counts the blobs in the local object store itself. Any blob after the first
+        # fetch, or anything but exactly the manifest blob after reading it, stops the job before any login.
+        env:
+          REPOSITORY: ${{ github.repository }}
+          COMMIT: ${{ github.sha }}
+          MANIFEST_PATH: ${{ inputs.manifest }}
+          GH_TOKEN: ${{ github.token }}
+          MANIFEST_GIT_DIR: ${{ runner.temp }}/notift-manifest.git
+          SOURCE_DIR: ${{ github.workspace }}/source
+        run: |
+          set -euo pipefail
+          [[ "$COMMIT" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::GitHub gaf geen volledige commit"; exit 1; }
+          [[ "$MANIFEST_PATH" =~ ^[A-Za-z0-9_-][A-Za-z0-9._-]*(/[A-Za-z0-9_-][A-Za-z0-9._-]*)*\.json$ ]] \
+            || { echo "::error::het manifestpad is geen gewoon relatief .json-pad"; exit 1; }
+          [ ! -e "$SOURCE_DIR" ] && [ ! -e "$MANIFEST_GIT_DIR" ] || { echo "::error::de manifestmappen bestaan al"; exit 1; }
+          export GIT_TERMINAL_PROMPT=0 GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=http.https://github.com/.extraheader
+          GIT_CONFIG_VALUE_0="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$GH_TOKEN" | base64 | tr -d '\n')"
+          export GIT_CONFIG_VALUE_0
+          blobs() { git -C "$MANIFEST_GIT_DIR" cat-file --batch-all-objects --batch-check='%(objecttype) %(objectname)' | awk '$1 == "blob" { print $2 }'; }
+          git init --quiet --bare "$MANIFEST_GIT_DIR"
+          git -C "$MANIFEST_GIT_DIR" remote add origin "https://github.com/$REPOSITORY.git"
+          git -C "$MANIFEST_GIT_DIR" fetch --quiet --no-tags --depth=1 --filter=blob:none origin "$COMMIT"
+          FETCHED="$(blobs)"
+          [ -z "$FETCHED" ] || { echo "::error::de Git-server paste het blobfilter niet toe ($(printf '%s\n' "$FETCHED" | wc -l | tr -d ' ') bestanden van de klantrepo kwamen mee); job 2 stopt voordat het manifest gelezen wordt"; exit 1; }
+          ENTRY="$(git -C "$MANIFEST_GIT_DIR" ls-tree --full-tree "$COMMIT" -- "$MANIFEST_PATH")"
+          MODE=""; TYPE=""; BLOB=""; NAME=""
+          read -r MODE TYPE BLOB NAME <<< "$ENTRY" || true
+          [ -n "$ENTRY" ] && [ "$NAME" = "$MANIFEST_PATH" ] || { echo "::error::$MANIFEST_PATH ontbreekt in deze commit. Zie de README van de bouwlaag."; exit 1; }
+          [ "$TYPE" = blob ] && { [ "$MODE" = 100644 ] || [ "$MODE" = 100755 ]; } \
+            || { echo "::error::het manifest is geen gewoon bestand (modus $MODE, $TYPE): $MANIFEST_PATH"; exit 1; }
+          SIZE="$(ulimit -f 256 && git -C "$MANIFEST_GIT_DIR" cat-file -s "$BLOB")" \
+            || { echo "::error::het manifest kon niet begrensd worden opgehaald (groter dan 256 KiB?)"; exit 1; }
+          [ "$(blobs)" = "$BLOB" ] || { echo "::error::na het ophalen van het manifest staat er meer dan alleen die ene blob in de objectmap; job 2 stopt"; exit 1; }
+          [ "$SIZE" -le 65536 ] || { echo "::error::het manifest is groter dan 64 KiB en wordt niet gelezen"; exit 1; }
+          mkdir -p "$SOURCE_DIR/$(dirname "$MANIFEST_PATH")"
+          git -C "$MANIFEST_GIT_DIR" cat-file blob "$BLOB" | head -c 65536 > "$SOURCE_DIR/$MANIFEST_PATH"
+          rm -rf "$MANIFEST_GIT_DIR"
+
+      - name: Beleid en publicatiegegevens
+        id: beleid
+        # Module, package, plan, profile and build number come from the manifest this job fetched itself, through the
+        # validator of the build layer; the rules are those of job 1, but here each one refuses.
+        env:
+          BUILD_LAYER_DIR: ${{ runner.temp }}/notift-build
+          MANIFEST_PATH: ${{ inputs.manifest }}
+          POLICY: ${{ inputs.policy }}
+          EVENT: ${{ github.event_name }}
+          REF: ${{ github.ref }}
+          COMMIT: ${{ github.sha }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+        run: python3 -I "$BUILD_LAYER_DIR/checks/publish_policy.py" publish "$GITHUB_WORKSPACE/source" "$MANIFEST_PATH" >> "$GITHUB_OUTPUT"
+
+      - name: Een lege overdrachtsmap
+        env:
+          TRANSFER_DIR: ${{ runner.temp }}/notift-transfer
+        run: |
+          set -euo pipefail
+          [ ! -e "$TRANSFER_DIR" ] || { echo "::error::$TRANSFER_DIR bestaat al"; exit 1; }
+          mkdir -m 0700 "$TRANSFER_DIR"
 
       - name: Het resultaat ophalen
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          name: site
-          path: .notift-context/site
+          name: site.tar
+          path: ${{ runner.temp }}/notift-transfer/in
+          # Never unzipped by the action: only transfer.py below reads these bytes.
+          skip-decompress: true
+
+      - name: Uitpakken en de bouwcontext samenstellen
+        # Bounded unpack into a fresh folder (no links, no special files, size and count limits), then a
+        # separate Docker context with only the checked files under site/. Client .gz files, /_notift/ and
+        # /_health are left out: job 2 makes those itself.
+        env:
+          BUILD_LAYER_DIR: ${{ runner.temp }}/notift-build
+          TRANSFER_DIR: ${{ runner.temp }}/notift-transfer
+          CONTEXT_DIR: ${{ runner.temp }}/.notift-context
+        run: |
+          set -euo pipefail
+          python3 -I "$BUILD_LAYER_DIR/checks/transfer.py" unpack "$TRANSFER_DIR/in" "$TRANSFER_DIR/site"
+          python3 -I "$BUILD_LAYER_DIR/checks/transfer.py" assemble "$TRANSFER_DIR/site" "$CONTEXT_DIR"
 
       - name: De uitvoer opnieuw keuren
         # Het artefact is de brug tussen twee jobs, en job 1 draaide vreemde
-        # code. Wat daar goedgekeurd is, hoeft niet te zijn wat hier aankomt.
+        # code. Gekeurd wordt de map die naar Docker gaat, met het manifest dat
+        # deze job zelf ophaalde.
         env:
           BUILD_LAYER_DIR: ${{ runner.temp }}/notift-build
+          CONTEXT_DIR: ${{ runner.temp }}/.notift-context
           MANIFEST_PATH: ${{ inputs.manifest }}
-        run: python3 "$BUILD_LAYER_DIR/checks/check_output.py" .notift-context/site "$MANIFEST_PATH"
+        run: python3 -I "$BUILD_LAYER_DIR/checks/check_output.py" "$CONTEXT_DIR/site" "$GITHUB_WORKSPACE/source/$MANIFEST_PATH"
+
+      - name: De Lovable-keuring
+        # Profile lovable, as this job read it. Output only: the exact client files that go into the image.
+        # This job holds packages: write, so it never opens the client's source tree; the source checks and
+        # required routes ran in job 1 (audit 2, finding N1). Exit 0 is ok, anything else refuses.
+        if: steps.beleid.outputs.profile == 'lovable'
+        env:
+          BUILD_LAYER_DIR: ${{ runner.temp }}/notift-build
+          CONTEXT_DIR: ${{ runner.temp }}/.notift-context
+        run: python3 -I "$BUILD_LAYER_DIR/checks/check_lovable.py" --output-only --output "$CONTEXT_DIR/site"
 
       - name: De redirects van de site
         # Redirects per pad (docs/07-bouwlaag.md). _redirects in de uitvoer wordt een nginx-map naast de
@@ -256,11 +449,12 @@ jobs:
         # include-eis, base/redirects-gate.sh). Een fout weigert de build met
         # de regel erbij (check_output.py hierboven weigerde al, met dezelfde parser). Zonder _redirects is de
         # map leeg. Het bestand zelf wordt niet geserveerd, zoals bij Netlify en Cloudflare Pages.
+        working-directory: ${{ runner.temp }}
         env:
           BUILD_LAYER_DIR: ${{ runner.temp }}/notift-build
         run: |
           set -euo pipefail
-          python3 "$BUILD_LAYER_DIR/checks/redirects.py" generate .notift-context/site .notift-context/redirects.map
+          python3 -I "$BUILD_LAYER_DIR/checks/redirects.py" generate .notift-context/site .notift-context/redirects.map
           rm -f .notift-context/site/_redirects
 
       - name: Het formulierscript van het platform
@@ -268,6 +462,7 @@ jobs:
         # and never from the dashboard at run time. /_notift/ is reserved: whatever the customer
         # build put there is removed first, so a planted forms.js (or a symlink) cannot survive.
         # Placed before compression so nginx also serves a gzip copy.
+        working-directory: ${{ runner.temp }}
         env:
           BUILD_LAYER_DIR: ${{ runner.temp }}/notift-build
         run: |
@@ -280,28 +475,37 @@ jobs:
       - name: Vooraf comprimeren
         # Wat je zelf kunt oplossen, moet je niet aan de klant melden. nginx
         # serveert deze bestanden kant-en-klaar, zie gzip_static in nginx.conf.
-        # Dit gebeurt hier en niet in job 1, zodat de keuring hierboven naar
-        # gewone bestanden kijkt en niet naar gecomprimeerde.
+        # Every .gz that nginx can serve is made here, from a checked file: a .gz
+        # from the build is removed first (assemble already left them out).
+        working-directory: ${{ runner.temp }}
         run: |
           set -euo pipefail
-          find .notift-context/site \
+          find .notift-context/site -type f -name '*.gz' -exec rm -f {} +
+          find .notift-context/site -type f \
             \( -name '*.html' -o -name '*.css' -o -name '*.js' -o -name '*.svg' -o -name '*.json' \) \
             -size +1k -exec gzip -9 -k -f {} \;
 
       - name: Het gezondheidspad stempelen
         # Doel 5 van de runtime-laag: de uitrol vraagt hier het buildnummer op en
-        # vergelijkt het met wat hij verwachtte. Zonder dit weet je niet met
-        # welke versie je praat. Het wordt hier gezet en niet in job 1, want de
-        # klant mag dit nummer niet kunnen schrijven.
+        # vergelijkt het met wat hij verwachtte. Gezet in deze job, uit het eigen
+        # beleid, want de klant mag dit nummer niet kunnen schrijven.
         env:
-          BUILD: ${{ needs.bouwen.outputs.build }}
-        run: printf '%s' "$BUILD" > .notift-context/site/_health
+          BUILD: ${{ steps.beleid.outputs.build }}
+          CONTEXT_DIR: ${{ runner.temp }}/.notift-context
+        run: printf '%s' "$BUILD" > "$CONTEXT_DIR/site/_health"
 
       - name: De bouwcontext klaarzetten
-        # De Dockerfile komt uit onze eigen repo en niet uit het artefact.
+        # De Dockerfile komt uit onze eigen repo en niet uit het artefact. Daarna
+        # de laatste meting: alleen Dockerfile, redirects.map en site/, geen
+        # verwijzing, geen hardlink, geen verborgen pad buiten .well-known/, en
+        # elke .gz is precies de gecomprimeerde vorm van zijn buur.
         env:
           BUILD_LAYER_DIR: ${{ runner.temp }}/notift-build
-        run: cp "$BUILD_LAYER_DIR/base/site.Dockerfile" .notift-context/Dockerfile
+          CONTEXT_DIR: ${{ runner.temp }}/.notift-context
+        run: |
+          set -euo pipefail
+          install -m 0644 "$BUILD_LAYER_DIR/base/site.Dockerfile" "$CONTEXT_DIR/Dockerfile"
+          python3 -I "$BUILD_LAYER_DIR/checks/transfer.py" verify-context "$CONTEXT_DIR"
 
       - name: Inloggen bij ghcr.io
         uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
@@ -314,12 +518,14 @@ jobs:
         id: publiceren
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
-          context: .notift-context
+          context: ${{ runner.temp }}/.notift-context
+          file: ${{ runner.temp }}/.notift-context/Dockerfile
           push: true
           # Punt 8 van het contract: de machines zijn x86. Een image voor de
           # verkeerde architectuur start niet, en dat wil je hier merken.
           platforms: linux/amd64
-          tags: ${{ needs.bouwen.outputs.package }}:${{ needs.bouwen.outputs.build }}
+          # Unique per run and attempt: two runs never write the same tag. Rollout goes by digest.
+          tags: ${{ steps.beleid.outputs.package }}:${{ steps.beleid.outputs.tag }}
           # BASE staat op een digest en niet op de tag `:1`, om dezelfde reden
           # waarom deploy.sh alleen een digest accepteert: een tag kan
           # verplaatsen, en dan levert een herbouw van dezelfde klantcode
@@ -329,21 +535,22 @@ jobs:
           # Let op: in dit blok is elke regel een bouwparameter. Commentaar hoort
           # hierboven, want daarbinnen wordt het als een parameter meegegeven.
           # Dat is een keer gebeurd en het viel pas op in de log van een run.
+          # Every value below comes from this job (publish_policy.py checked each one is a single line).
           build-args: |
             BASE=ghcr.io/notift/static-base@sha256:cbd5b0ac32eb37761e9f8135d0c6ed5e199de331d0436c748f5805ba78938dbd
-            BUILD=${{ needs.bouwen.outputs.build }}
-            ORGANISATION=${{ needs.bouwen.outputs.organisation }}
-            PROJECT=${{ needs.bouwen.outputs.project }}
-            MODULE=${{ needs.bouwen.outputs.module }}
-            PLAN=${{ needs.bouwen.outputs.plan }}
+            BUILD=${{ steps.beleid.outputs.build }}
+            ORGANISATION=${{ steps.beleid.outputs.organisation }}
+            PROJECT=${{ steps.beleid.outputs.project }}
+            MODULE=${{ steps.beleid.outputs.module }}
+            PLAN=${{ steps.beleid.outputs.plan }}
             COMMIT=${{ github.sha }}
             REPO=${{ github.repository }}
-            WORKFLOW=notift/build@${{ needs.bouwen.outputs.workflow }}
+            WORKFLOW=notift/build@${{ steps.bouwlaag.outputs.sha }}
 
       - name: De onveranderlijke imageverwijzing
         id: referentie
         env:
-          PACKAGE: ${{ needs.bouwen.outputs.package }}
+          PACKAGE: ${{ steps.beleid.outputs.package }}
           DIGEST: ${{ steps.publiceren.outputs.digest }}
         run: |
           set -euo pipefail
@@ -366,30 +573,31 @@ jobs:
         env:
           NOTIFT_DEPLOY_SECRET: ${{ secrets.NOTIFT_DEPLOY_SECRET }}
           BUILD_LAYER_DIR: ${{ runner.temp }}/notift-build
-          BUILD: ${{ needs.bouwen.outputs.build }}
+          BUILD: ${{ steps.beleid.outputs.build }}
           IMAGE: ${{ steps.referentie.outputs.image }}
-          MODULE: ${{ needs.bouwen.outputs.module }}
-          PROJECT: ${{ needs.bouwen.outputs.project }}
-          PACKAGE: ${{ needs.bouwen.outputs.package }}
+          MODULE: ${{ steps.beleid.outputs.module }}
+          PROJECT: ${{ steps.beleid.outputs.project }}
+          PACKAGE: ${{ steps.beleid.outputs.package }}
           REPOSITORY: ${{ github.repository }}
           REF: ${{ github.ref }}
           COMMIT: ${{ github.sha }}
-          WORKFLOW: ${{ needs.bouwen.outputs.workflow }}
+          WORKFLOW: ${{ steps.bouwlaag.outputs.sha }}
           RUN_ID: ${{ github.run_id }}
           RUN_ATTEMPT: ${{ github.run_attempt }}
-        run: python3 "$BUILD_LAYER_DIR/checks/notify_deployment.py"
+        run: python3 -I "$BUILD_LAYER_DIR/checks/notify_deployment.py"
 
       - name: Wat je hierna nodig hebt
         env:
-          BUILD: ${{ needs.bouwen.outputs.build }}
+          BUILD: ${{ steps.beleid.outputs.build }}
+          TAG: ${{ steps.beleid.outputs.tag }}
           IMAGE: ${{ steps.referentie.outputs.image }}
-          MODULE: ${{ needs.bouwen.outputs.module }}
-          PROJECT: ${{ needs.bouwen.outputs.project }}
-          PACKAGE: ${{ needs.bouwen.outputs.package }}
+          MODULE: ${{ steps.beleid.outputs.module }}
+          PROJECT: ${{ steps.beleid.outputs.project }}
+          PACKAGE: ${{ steps.beleid.outputs.package }}
           REPOSITORY: ${{ github.repository }}
           REF: ${{ github.ref }}
           COMMIT: ${{ github.sha }}
-          WORKFLOW: ${{ needs.bouwen.outputs.workflow }}
+          WORKFLOW: ${{ steps.bouwlaag.outputs.sha }}
           RUN_ID: ${{ github.run_id }}
           RUN_ATTEMPT: ${{ github.run_attempt }}
         run: |
@@ -400,6 +608,7 @@ jobs:
             echo "| | |"
             echo "|---|---|"
             echo "| Build | \`$BUILD\` |"
+            echo "| Tag | \`$TAG\` (alleen ter herkenning; uitrollen gaat op de digest) |"
             echo "| Image | \`$IMAGE\` |"
             echo "| Module | \`$MODULE\` |"
             echo "| Project | \`$PROJECT\` |"

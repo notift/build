@@ -193,6 +193,46 @@ cp -R "$WORK/goed" "$WORK/metonleesbarejwt"
 printf 'const s = "%s";' "$ONLEESBAAR" > "$WORK/metonleesbarejwt/db.js"
 verwacht weigeren "een JWT waarvan de rol niet leesbaar is" "$WORK/metonleesbarejwt" gewoon
 
+# Audit 3, N7: client text with both command syntaxes mid-line (a file name, an HTML attribute, a manifest key)
+# is shown inert: no '##[' anywhere, no '::' beyond the fixed annotation prefix. At most 300 finding lines and
+# 10 annotations per run.
+inert_uit() {  # inert_uit <description> <site> <manifest> <escaped text>...
+  local wat="$1" site="$2" m="$3" rc=0 uit rest; shift 3
+  uit="$(GITHUB_ACTIONS=true python3 -I "$CHECK" "$site" "$m" 2>&1)" || rc=$?
+  rest="$(printf '%s\n' "$uit" | sed 's/^::error title=Controle van de uitvoer:://')"
+  local ok=1
+  [ "$rc" -eq 1 ] || ok=0
+  printf '%s\n' "$uit" | grep -qF '##[' && ok=0
+  printf '%s\n' "$rest" | grep -qF '::' && ok=0
+  for t in "$@"; do printf '%s\n' "$uit" | grep -qF -- "$t" || ok=0; done
+  if [ "$ok" = 1 ]; then pass "$wat: blijft data"; else bad "$wat (exit $rc)"; printf '%s\n' "$uit" | sed 's/^/      /' >&2; fi
+}
+cp -R "$WORK/goed" "$WORK/n7-mid"
+printf 'const s = "sk_live_51H8xQ2eZvKYlo2CabcdefghijK";' > "$WORK/n7-mid/a::warning::bestand ##[error]b.js"
+printf '<a href="/c::warning::attribuut ##[error]d.html">meer</a>' >> "$WORK/n7-mid/index.html"
+inert_uit "'::warning::' en '##[error]' midden in een bestandsnaam en een attribuut" "$WORK/n7-mid" "$WORK/gewoon.json" \
+  'a:\x3awarning:\x3abestand #\x23[error]b.js' 'c:\x3awarning:\x3aattribuut #\x23[error]d.html'
+python3 -I - "$WORK/gewoon.json" "$WORK/n7-sleutel.json" <<'PY2'
+import json, sys
+m = json.load(open(sys.argv[1])); m["build"]["k::warning::sleutel ##[error]k"] = 1
+json.dump(m, open(sys.argv[2], "w"))
+PY2
+inert_uit "'::warning::' en '##[error]' midden in een manifestsleutel" "$WORK/goed" "$WORK/n7-sleutel.json" \
+  'k:\x3awarning:\x3asleutel #\x23[error]k'
+cp -R "$WORK/goed" "$WORK/n7-veel"
+python3 -I -c '
+import sys
+for i in range(350):
+    open(f"{sys.argv[1]}/geheim{i}.js", "w").write("const s = \"sk_live_51H8xQ2eZvKYlo2CabcdefghijK\";")
+' "$WORK/n7-veel"
+RC=0; UIT="$(GITHUB_ACTIONS=true python3 -I "$CHECK" "$WORK/n7-veel" "$WORK/gewoon.json" 2>&1)" || RC=$?
+if [ "$RC" -eq 1 ] && [ "$(printf '%s\n' "$UIT" | grep -c '^    FOUT ')" -eq 300 ] \
+    && [ "$(printf '%s\n' "$UIT" | grep -c '^::error ')" -eq 10 ] && printf '%s\n' "$UIT" | grep -q '50 melding(en) niet getoond'; then
+  pass "350 weigeringen: 300 regels, 10 annotaties, de rest geteld"
+else
+  bad "350 weigeringen gaven niet 300 regels en 10 annotaties (exit $RC)"
+fi
+
 printf '\n'
 if [ "$FAILED" -ne 0 ]; then
   printf '  %sEr klopt iets niet aan de controle zelf.%s\n\n' "$C_ERR" "$C_OFF" >&2

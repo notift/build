@@ -18,6 +18,7 @@ import base64
 import json
 import os
 import re
+import stat
 import sys
 from html.parser import HTMLParser
 
@@ -38,6 +39,54 @@ AFBEELDINGEN = (".png", ".jpg", ".jpeg", ".webp", ".avif", ".gif", ".svg")
 
 # Pagina's die niet gevonden hoeven te worden en dus geen tekst hoeven te hebben.
 TECHNISCHE_PAGINAS = {"404.html", "500.html", "offline.html"}
+
+# The manifest is a small JSON file; anything larger is refused before parsing (audit 2, finding N2).
+MAX_MANIFEST_BYTES = 64 * 1024
+
+# One log line of client-derived text, at most this many characters (audit 2, finding N7), and at most
+# this many finding lines and error annotations per run (audit 3, N7), as in check_lovable.py.
+MAX_LOG_LINE = 400
+MAX_PRINTED = 300
+MAX_ANNOTATIONS = 10
+
+
+def safe_line(text, limit=MAX_LOG_LINE):
+    """Client-derived text as one inert log line (audit 2, finding N7).
+
+    Every character that is not printable (line breaks, other control characters, Unicode line and
+    paragraph separators), every default-ignorable code point and the backslash itself become a visible
+    escape. Then both workflow command syntaxes are broken wherever they appear in the line (audit 3, N7):
+    '::' (the current form, a command when a line starts with it) becomes ':\\x3a', and '##[' (the legacy
+    form, which the runner still finds anywhere in a line) becomes '#\\x23['. The escapes start with a
+    backslash, so they cannot form a new '::' or '##['. The result is cut to `limit` characters.
+    """
+    out = []
+    for ch in str(text):
+        code = ord(ch)
+        if ch == "\\":
+            out.append("\\\\")
+        elif ch.isprintable() and not _ignorable(code):
+            out.append(ch)
+        else:
+            out.append(f"\\x{code:02x}" if code < 0x100 else f"\\u{code:04x}" if code < 0x10000 else f"\\U{code:08x}")
+    line = "".join(out).replace("::", ":\\x3a").replace("##[", "#\\x23[")
+    return line if len(line) <= limit else line[: limit - 3] + "..."
+
+
+# Unicode Default_Ignorable_Code_Point ranges that Python still calls printable (most are format characters
+# and escaped anyway). A culture-aware string search can skip them, so '#<ignorable>#[' could still read as
+# '##[' to the runner; escaped, they are plain ASCII.
+_IGNORABLE = ((0x034F, 0x034F), (0x115F, 0x1160), (0x17B4, 0x17B5), (0x180B, 0x180F), (0x3164, 0x3164),
+              (0xFE00, 0xFE0F), (0xFFA0, 0xFFA0), (0xE0000, 0xE0FFF))
+
+
+def _ignorable(code):
+    return any(lo <= code <= hi for lo, hi in _IGNORABLE)
+
+
+def annotation_data(text, limit=MAX_LOG_LINE):
+    """safe_line, plus the escape GitHub defines for the data of a workflow command."""
+    return safe_line(text, limit).replace("%", "%25")
 
 # ---------------------------------------------------------------------------
 # Geheimen.
@@ -78,11 +127,29 @@ VORMEN = {
     "project": r"^prj_[0-9]{5}$",
     "module": r"^mod_[0-9]{5}$",
     "plan": r"^[a-z][a-z0-9-]{0,62}$",
-    "build.command": r"^(?:npm|pnpm|yarn) run [A-Za-z0-9][A-Za-z0-9:_-]*(?: -- [A-Za-z0-9][A-Za-z0-9._:=@/+,-]*)*$",
-    "build.output": r"^[A-Za-z0-9][A-Za-z0-9._/-]*$",
+    "build.command": r"^(?:npm|pnpm|yarn|bun) run [A-Za-z0-9][A-Za-z0-9:_-]*(?: -- [A-Za-z0-9][A-Za-z0-9._:=@/+,-]*)*$",
+    # Segments may start with a dot (.output/public, the TanStack Start/Nitro layout). Each segment is
+    # checked separately below: no empty, '.', '..' or '.git' segment, so the output stays inside the repo.
+    "build.output": r"^[A-Za-z0-9._-]+(?:/[A-Za-z0-9._-]+)*$",
     "build.node": r"^[0-9]{1,2}(?:\.[0-9]+){0,2}$",
-    "build.manager": r"^(?:npm|pnpm|yarn)$",
+    "build.manager": r"^(?:npm|pnpm|yarn|bun)$",
+    # An exact bun release, never a range or 'latest': the same manifest must give the same installer.
+    "build.bun": r"^1\.[0-9]{1,2}\.[0-9]{1,3}$",
+    "build.profile": r"^(?:static|lovable)$",
+    "build.trigger": r"^(?:push|manual)$",
 }
+
+# Keys allowed in the build object. Anything else is refused, so a typo (instal_scripts) cannot silently
+# fall back to a default. Keys starting with '$' are comments, as in notift.example.json.
+BUILD_SLEUTELS = {"command", "output", "node", "manager", "bun", "profile", "trigger", "install_scripts"}
+
+# Opt-in for dependency install scripts: an npm package name, exact, at most this many. Never a pattern.
+PAKKETNAAM = r"^(?:@[a-z0-9][a-z0-9._-]{0,100}/)?[a-z0-9][a-z0-9._-]{0,100}$"
+MAX_INSTALL_SCRIPTS = 10
+# The modes install_deps.sh knows. Never accepted as a package name, even though the two travel apart.
+INSTALL_MODI = {"none", "named", "legacy-all", "all"}
+# Notift's own list of packages a site may name (audit finding 4: exceptions stay narrow and Notift's).
+INSTALL_UITZONDERINGEN = os.path.join(os.path.dirname(os.path.abspath(__file__)), "install-scripts-allowed.txt")
 
 
 class Bevindingen:
@@ -157,8 +224,23 @@ class Pagina(HTMLParser):
 # ---------------------------------------------------------------------------
 
 def lees_manifest(pad):
-    with open(pad, "r", encoding="utf-8") as f:
-        m = json.load(f)
+    # Bounded before parsing, the file itself never through a link, and only a regular file (N2).
+    try:
+        fd = os.open(pad, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except OSError as e:
+        sys.exit(f"het manifest is niet te openen als gewoon bestand ({e.strerror}): {pad}")
+    with os.fdopen(fd, "rb") as f:
+        if not stat.S_ISREG(os.fstat(f.fileno()).st_mode):
+            sys.exit(f"het manifest is geen gewoon bestand: {pad}")
+        data = f.read(MAX_MANIFEST_BYTES + 1)
+    if len(data) > MAX_MANIFEST_BYTES:
+        sys.exit(f"het manifest is groter dan {MAX_MANIFEST_BYTES // 1024} KiB en wordt niet gelezen: {pad}")
+    try:
+        m = json.loads(data.decode("utf-8"))
+    except ValueError as e:
+        sys.exit(f"het manifest is geen geldige JSON in UTF-8 ({e.__class__.__name__}): {pad}")
+    if not isinstance(m, dict):
+        sys.exit(f"het manifest is geen JSON-object: {pad}")
     if "customer" in m:
         sys.exit("manifestveld 'customer' is vervallen; gebruik organisation, project en module")
     for veld in ("organisation", "project", "module", "plan", "package", "build"):
@@ -169,8 +251,13 @@ def lees_manifest(pad):
     for veld in ("command", "output"):
         if not m["build"].get(veld):
             sys.exit(f"manifest mist het veld 'build.{veld}': {pad}")
+    onbekend = sorted(k for k in m["build"] if not k.startswith("$") and k not in BUILD_SLEUTELS)
+    if onbekend:
+        sys.exit(f"manifestveld 'build' kent deze sleutel niet: {', '.join(onbekend)}")
     m["build"].setdefault("node", "22")
     m["build"].setdefault("manager", "npm")
+    m["build"].setdefault("profile", "static")
+    lees_bouwprofiel(m["build"])
     m.setdefault("searchable", True)
     m.setdefault("allowed_public_keys", [])
     if not isinstance(m["searchable"], bool):
@@ -223,12 +310,101 @@ def lees_manifest(pad):
     for veld, waarde in waarden.items():
         if not isinstance(waarde, str) or not re.fullmatch(VORMEN[veld], waarde):
             sys.exit(f"manifestveld '{veld}' heeft ongeldige vorm: {waarde}")
-    if any(deel in ("", ".", "..") for deel in m["build"]["output"].split("/")):
+    if any(deel in ("", ".", "..", ".git") for deel in m["build"]["output"].split("/")):
         sys.exit("manifestveld 'build.output' moet een gewone relatieve map zijn")
+    for veld in ("bun", "profile", "trigger"):
+        if veld in m["build"] and (
+            not isinstance(m["build"][veld], str) or not re.fullmatch(VORMEN[f"build.{veld}"], m["build"][veld])
+        ):
+            sys.exit(f"manifestveld 'build.{veld}' heeft ongeldige vorm: {m['build'][veld]}")
     verwacht_pakket = f"ghcr.io/notift/{m['module']}"
     if m["package"] != verwacht_pakket:
         sys.exit(f"manifestveld 'package' moet exact '{verwacht_pakket}' zijn, niet '{m['package']}'")
     return m
+
+
+def lees_bouwprofiel(build):
+    """Profile, trigger and install scripts: strict, with defaults that keep existing sites unchanged.
+
+    profile 'static' (default) is every site that built before this field existed. profile 'lovable' is a
+    TanStack Start project from Lovable: bun with a pinned version, output exactly .output/public (so the
+    server bundle in .output/server is never the output), built on request by default.
+    """
+    profiel = build["profile"]
+    if not isinstance(profiel, str) or not re.fullmatch(VORMEN["build.profile"], profiel):
+        sys.exit(f"manifestveld 'build.profile' heeft ongeldige vorm: {profiel}")
+    manager = build["manager"]
+    if manager == "bun":
+        if "bun" not in build:
+            sys.exit("manifestveld 'build.bun' ontbreekt: bij manager bun hoort een exacte versie, zoals 1.4.4")
+        commando = build.get("command")
+        if not isinstance(commando, str) or not commando.startswith("bun run "):
+            sys.exit("manifestveld 'build.command' moet bij manager bun beginnen met 'bun run '")
+    elif "bun" in build:
+        sys.exit("manifestveld 'build.bun' hoort alleen bij manager bun")
+    if profiel == "lovable":
+        if manager != "bun":
+            sys.exit("profiel lovable bouwt met bun en bun.lock: zet build.manager op bun")
+        if build.get("output") != ".output/public":
+            sys.exit("profiel lovable levert alleen .output/public: zet build.output op .output/public")
+    build.setdefault("trigger", "manual" if profiel == "lovable" else "push")
+
+    # Install scripts of dependencies. The manifest field stays 'build.install_scripts' ('none' or a list
+    # of package names), but it travels to install_deps.sh as two separate values, so a package name can
+    # never be read as a mode (audit finding 4):
+    #   install_mode      none | named | legacy-all
+    #   install_packages  space-separated names, empty unless install_mode is named
+    # legacy-all is the explicit compatibility for a static npm/pnpm/yarn site whose manifest predates
+    # the field: it keeps running every install script exactly as before. It cannot be chosen in the
+    # manifest, only reached by leaving the field out.
+    if "install_scripts" not in build:
+        if profiel == "static" and manager != "bun":
+            build["install_mode"], build["install_packages"] = "legacy-all", []
+        else:
+            build["install_mode"], build["install_packages"] = "none", []
+        return
+    keuze = build["install_scripts"]
+    if keuze == "none":
+        build["install_mode"], build["install_packages"] = "none", []
+        return
+    if not isinstance(keuze, list) or not keuze:
+        sys.exit("manifestveld 'build.install_scripts' is 'none' of een lijst met pakketnamen")
+    if manager == "bun":
+        sys.exit("manifestveld 'build.install_scripts': een lijst kan nog niet bij bun; alleen 'none'")
+    if len(keuze) > MAX_INSTALL_SCRIPTS or len(set(keuze)) != len(keuze):
+        sys.exit(f"manifestveld 'build.install_scripts': hoogstens {MAX_INSTALL_SCRIPTS} verschillende pakketten")
+    toegestaan = lees_installatie_uitzonderingen()
+    for naam in keuze:
+        if not isinstance(naam, str) or not re.fullmatch(PAKKETNAAM, naam) or naam in INSTALL_MODI:
+            sys.exit(f"manifestveld 'build.install_scripts' bevat geen geldige pakketnaam: {naam}")
+        if naam not in toegestaan:
+            sys.exit(
+                f"manifestveld 'build.install_scripts': {naam} staat niet op de lijst van Notift "
+                f"(checks/{os.path.basename(INSTALL_UITZONDERINGEN)}); een uitzondering voegt Notift toe, niet de site"
+            )
+    build["install_mode"], build["install_packages"] = "named", list(keuze)
+
+
+def lees_installatie_uitzonderingen(pad=None):
+    """The Notift-owned list of packages whose install scripts a site may opt in to.
+
+    It lives in the build layer (next to this script), so the client repo can only pick from it, never
+    widen it. One exact package name per line, '#' starts a comment. Starts empty.
+    """
+    pad = pad or INSTALL_UITZONDERINGEN
+    namen = set()
+    try:
+        with open(pad, encoding="utf-8") as fh:
+            for regel in fh:
+                regel = regel.split("#", 1)[0].strip()
+                if not regel:
+                    continue
+                if not re.fullmatch(PAKKETNAAM, regel) or regel in INSTALL_MODI:
+                    sys.exit(f"{os.path.basename(pad)} bevat geen geldige pakketnaam: {regel}")
+                namen.add(regel)
+    except FileNotFoundError:
+        pass
+    return namen
 
 
 def github_output(manifestpad):
@@ -244,9 +420,22 @@ def github_output(manifestpad):
         "output": m["build"]["output"],
         "node": m["build"]["node"],
         "manager": m["build"]["manager"],
+        "bun": m["build"].get("bun", ""),
+        "profile": m["build"]["profile"],
+        "trigger": m["build"]["trigger"],
+        # Two fields, never one: see lees_bouwprofiel. install_deps.sh refuses the old single field.
+        "install_mode": m["build"]["install_mode"],
+        "install_packages": " ".join(m["build"]["install_packages"]),
+        # setup-node has no bun cache; an empty value turns caching off for that step.
+        "cache": "" if m["build"]["manager"] == "bun" else m["build"]["manager"],
     }
     for naam, waarde in waarden.items():
         print(f"{naam}={waarde}")
+    if m["build"]["install_mode"] == "legacy-all":
+        # Explicit, so the compatibility is visible in every run until the site's manifest names a mode.
+        print("::warning title=Install-scripts::install_scripts ontbreekt in het manifest: deze bestaande "
+              "statische site draait alle install-scripts zoals voorheen (legacy-all). Zet 'none' zodra het kan.",
+              file=sys.stderr)
 
 
 def bestanden(root):
@@ -427,11 +616,22 @@ def annoteer(soort, tekst):
     """Een GitHub-annotatie: de reden staat dan bovenaan de run. De mail van GitHub over de mislukte run
     gaat naar wie pushte en linkt naar de run (besluit 106)."""
     if os.environ.get("GITHUB_ACTIONS") == "true":
-        tekst = tekst.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
-        print(f"::{soort} title=Controle van de uitvoer::{tekst}")
+        print(f"::{soort} title=Controle van de uitvoer::{annotation_data(tekst)}")
 
 
 def main():
+    try:
+        return _main()
+    except SystemExit as e:
+        # The validator reports with sys.exit(<reason>); a reason can carry client text (N7).
+        if isinstance(e.code, str):
+            print(safe_line(e.code), file=sys.stderr)
+            annoteer("error", e.code)
+            return 1
+        raise
+
+
+def _main():
     if len(sys.argv) == 3 and sys.argv[1] == "--github-output":
         github_output(sys.argv[2])
         return 0
@@ -458,16 +658,30 @@ def main():
     print(f"  project {manifest['project']}, gevonden worden: "
           f"{'ja' if manifest['searchable'] else 'nee'}")
 
+    regels = [0, 0]  # printed finding lines, annotations
+
+    def meld(prefix, wat, waar, fout):
+        tekst = wat + (f"  [{waar}]" if waar else "")
+        if regels[0] < MAX_PRINTED:
+            print(safe_line(f"    {prefix}  {tekst}"))
+            regels[0] += 1
+        if fout and regels[1] < MAX_ANNOTATIONS:
+            annoteer("error", tekst)
+            regels[1] += 1
+
     if b.waarschuwingen:
         print(f"\n  {len(b.waarschuwingen)} waarschuwing(en):")
         for wat, waar in b.waarschuwingen:
-            print(f"    let op  {wat}" + (f"  [{waar}]" if waar else ""))
+            meld("let op", wat, waar, False)
 
     if b.weigeringen:
         print(f"\n  {len(b.weigeringen)} reden(en) om niet te publiceren:")
         for wat, waar in b.weigeringen:
-            print(f"    FOUT    {wat}" + (f"  [{waar}]" if waar else ""))
-            annoteer("error", wat + (f"  [{waar}]" if waar else ""))
+            meld("FOUT  ", wat, waar, True)
+    totaal = len(b.waarschuwingen) + len(b.weigeringen)
+    if totaal > regels[0]:
+        print(f"\n  {totaal - regels[0]} melding(en) niet getoond.")
+    if b.weigeringen:
         print("\n  Er wordt niets gepubliceerd.\n")
         return 1
 

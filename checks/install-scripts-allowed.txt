@@ -1,0 +1,7 @@
+# Packages whose dependency install scripts a site may opt in to with build.install_scripts.
+#
+# Owned by Notift, in the build layer: a client repo can only pick from this list, never widen it
+# (audit finding 4). One exact npm package name per line. Starts empty on purpose: add a name only
+# with a reason and the site that needs it, in the same commit, and expect a rebuild of that site.
+#
+# Not yet bound to a resolved version or integrity; that is the trigger for the first entry here.

@@ -22,6 +22,8 @@ build wordt weggegooid. Wat hij aflevert is een image op `ghcr.io` dat het artef
 | `base/site.Dockerfile` | Het image van een site: het basisimage plus de gebouwde map, met de labels |
 | `checks/check_output.py` | Doel 4: keurt de uitvoer van de build. Weigert of waarschuwt |
 | `checks/check-output-proof.sh` | Het bewijs dat die controle werkelijk weigert. Draait op de Mac |
+| `checks/check_lovable.py` | Extra keuring voor een Lovable-project (TanStack Start): bron en statische uitvoer tegen de hostingregels uit `AGENTS.md`. Draait naast `check_output.py`, niet in plaats ervan |
+| `checks/check-lovable-proof.sh` | Per weigerregel een groen en een geweigerd geval, plus de waarschuwingen. Met twee argumenten ook tegen een echte build |
 | `checks/check-private-image-proof.sh` | Tegenproef voor doel 3: publiek rood en privaat groen op dezelfde meting |
 | `embed/forms.js` | Het formulierscript. Job 2 zet het in elk site-image op `/_notift/embed/forms.js`, over wat de klant daar neerzette (`docs/11-formulieren.md`, build 23) |
 | `checks/forms-embed-proof.sh` | Draait die stap uit de workflow tegen een geplant script en meet het resultaat met de nginx.conf van het basisimage |
@@ -32,13 +34,20 @@ build wordt weggegooid. Wat hij aflevert is een image op `ghcr.io` dat het artef
 | `workflow/build-and-publish.yml` | De herbruikbare workflow die elk project aanroept. Twee jobs, en dat is een grens |
 | `workflow/base-image.yml` | Het basisimage bouwen en publiceren. Met de hand te starten, niet vanzelf |
 | `notift.example.json` | Het manifest dat in de repo van een project komt |
+| `notift.lovable.example.json` | Hetzelfde voor een Lovable-project (TanStack Start): bun, `.output/public`, op verzoek |
+| `checks/install_deps.sh` | Job 1: installeren met vaste lockfile, install-scripts van pakketten alleen zoals het manifest zegt |
+| `checks/stage_output.py` | Job 1: zet precies `build.output` klaar in een verse map; alleen die map wordt het artefact |
+| `checks/warn_lovable_sync.sh` | Job 1: waarschuwt (faalt nooit) als de repo een tak `lovable-sync*` heeft |
+| `checks/publish_policy.py` | Beide jobs: mag deze run publiceren (alleen `main`, alleen push en handmatig, op verzoek, beleid van de aanroeper), en in job 2 de publicatiegegevens uit het manifest dat job 2 zelf ophaalt |
+| `checks/transfer.py` | De overdracht: job 1 pakt in als gewoon tar-bestand, job 2 pakt begrensd uit, stelt een eigen bouwcontext samen en meet die na |
 | `release.sh` | Zet deze map in de repo `notift/build`. Gaat zelf niet mee |
 | `verify.sh` | De stand bij GitHub, afleesbaar zonder door instellingenpagina's te klikken |
 
 ```
 ./checks/check-output-proof.sh                       eenentwintig gevallen, weigeren en waarschuwen
 ./checks/check-private-image-proof.sh                publieke en private tegenproef voor de afschermingsmeting
-./checks/build-layer-proof.sh                         manifestinjectie, vaste hash en werkmapgrens
+./checks/build-layer-proof.sh                         manifest, beleid, overdracht en job 2 nagespeeld, met tegenproeven
+LOVABLE_FIXTURE=<kopie> ./checks/build-layer-proof.sh  hetzelfde op de echte .output van een Lovable-project
 ./checks/forms-embed-proof.sh                         het formulierscript komt uit de bouwlaag, niet van de klant
 ./checks/redirects-proof.sh                           redirects per pad: elke foutsoort rood, de goede gevallen in nginx
 ./checks/release-signing-proof.sh <map>               release.sh en restore-release.sh pushen alleen een ondertekende commit
@@ -168,9 +177,11 @@ en dan bouwt een klant met code die hier niet staat.
 | `release.sh` | Gaat niet mee |
 
 **De tag `v1` verplaatsen is een aparte handeling**, en met opzet. Elke projectworkflow wijst naar
-die tag, dus verplaatsen raakt in een keer elke klant. Binnen één run wordt die tag precies eenmaal
-naar een commit-hash opgelost. Beide jobs halen daarna die hash op; job 2 weigert als zijn checkout
-niet exact die commit is. Een release tussen de jobs kan een lopende build dus niet veranderen.
+die tag, dus verplaatsen raakt in een keer elke klant. Welke bouwlaagcode een run gebruikt, zegt
+GitHub zelf: `job.workflow_sha` is de commit van het workflowbestand dat de job definieert, dus van
+`notift/build` op de versie die de aanroeper vastzette. Beide jobs halen precies die commit op en
+weigeren als `job.workflow_repository` niet `notift/build` is; job 2 neemt de hash nooit van job 1
+over. Een release tussen de jobs kan een lopende build dus niet veranderen.
 
 ## Hoe het loopt
 
@@ -181,7 +192,7 @@ niet exact die commit is. Een release tussen de jobs kan een lopende build dus n
 | 3 | `bouwen` | Het manifest zegt wat er gebouwd moet worden en waar de uitvoer komt |
 | 4 | `bouwen` | De build draait, en daarna wordt **de werkelijke uitvoer** gekeurd |
 | 5 | `bouwen` | Die uitvoer gaat als artefact naar de volgende job |
-| 6 | `publiceren` | De uitvoer wordt **opnieuw gekeurd**, gecomprimeerd en gestempeld met het buildnummer |
+| 6 | `publiceren` | De uitvoer wordt **begrensd uitgepakt in een eigen map, opnieuw gekeurd** (bij Lovable ook de Lovable-keuring), in een eigen bouwcontext gezet, gecomprimeerd en gestempeld met het buildnummer |
 | 7 | `publiceren` | Het basisimage plus die map wordt gepubliceerd op `ghcr.io`, met alle labels |
 | 8 | `publiceren` | De samenvatting en workflowoutputs geven de volledige digestreferentie plus alle herkomst voor de platformopdracht |
 
@@ -201,8 +212,28 @@ alleen dingen uit onze eigen repo.
 |---|---|
 | 1 | Code van een klant kan het token waarmee gepubliceerd wordt niet lezen |
 | 2 | De Dockerfile komt uit onze repo en niet uit het artefact, want dat artefact komt uit een job waar vreemde code in draaide |
-| 3 | Het buildnummer wordt in job 2 gestempeld, dus de klant kan het niet schrijven |
-| 4 | Het manifest wordt in job 2 vers uit de repo gelezen, niet doorgegeven via job 1 |
+| 3 | Het buildnummer wordt in job 2 gemaakt en gestempeld, dus de klant kan het niet schrijven |
+| 4 | Het manifest wordt in job 2 vers opgehaald en gevalideerd, alleen die ene blob van de exacte commit (geen checkout, geen andere klantbestanden op de runner): module, pakket (altijd `ghcr.io/notift/<module>`), plan, profiel en buildnummer komen niet via job 1 |
+| 5 | De bouwlaagcode in job 2 komt uit `job.workflow_sha` van GitHub, niet uit een uitvoer van job 1 |
+| 6 | Van job 1 neemt job 2 alleen het artefact en de vlag `go`, en vertrouwt geen van beide: het beleid wordt opnieuw beslist, en het artefact is invoer |
+
+**Wat job 2 met het artefact doet.** Job 1 kan gemanipuleerd zijn (de klant heeft daar `sudo`), dus het artefact
+is vijandige bytes. Het is één gewoon tar-bestand (`site.tar`, `upload-artifact` met `archive: false`, gedownload
+met `skip-decompress`), en alleen `checks/transfer.py` pakt het uit: in een lege map die job 2 zelf maakt in
+`runner.temp`, buiten elke checkout. Geweigerd vóór er iets geschreven wordt: verwijzingen, hardlinks, apparaten,
+fifo's, `..`, absolute paden, dubbele paden, stuurtekens, meer dan 10.000 bestanden, een bestand boven 100 MiB of
+samen boven 512 MiB. Daarna stelt job 2 de bouwcontext apart samen in `runner.temp/.notift-context`: alleen de
+gekeurde gewone bestanden onder `site/`, zonder `.gz` van de build, zonder `/_notift/` en zonder `_health`. Op
+precies die map draaien `check_output.py` en bij profiel `lovable` ook `check_lovable.py --output-only --output
+<context>/site`. Job 2 heeft `packages: write` en opent daarom de broncode van de klant niet: de bronkeuring en de
+vereiste routes draaien alleen in job 1. Elke lezer in `check_lovable.py` opent pad voor pad zonder verwijzingen
+te volgen, dus niets buiten de opgegeven map. Alle `.gz` maakt job 2 zelf. Vlak voor de build meet `transfer.py verify-context` dat de
+context alleen `Dockerfile`, `redirects.map` en `site/` bevat, zonder verwijzing, hardlink of verborgen pad, en dat
+elke `.gz` precies de gecomprimeerde vorm van zijn buur is. Een `.dockerignore` van de klant kan er dus niet zijn.
+
+**Verborgen bestanden.** Alleen `.well-known/` gaat mee (RFC 8615, bijvoorbeeld app-links). Job 1 laat elk ander
+pad met een punt-segment achter, met een melding, zoals `upload-artifact` dat eerder stil deed; job 2 weigert zo'n
+pad als het toch aankomt. `/.well-known/security.txt` blijft van Notift (nginx.conf).
 
 **Waarom de uitvoer twee keer gekeurd wordt:** het artefact is de brug tussen de twee jobs. Wat in
 job 1 goedgekeurd is, hoeft niet te zijn wat er in job 2 uit komt. Dat kost een paar seconden.
@@ -219,7 +250,9 @@ groeit" in `docs/07-bouwlaag.md`.
 Het manifest is invoer van de klant en geen stukje workflow. Elke waarde krijgt daarom bij het
 lezen een vaste vorm: organisatie, project en module hebben hun codevorm, het pakket moet precies
 bij de module horen, het plan heeft alleen kleine letters/cijfers/streepjes, en de bouwvorm is een
-`npm`, `pnpm` of `yarn`-script met veilige argumenten. Uitvoer is een gewone relatieve map. Daarna
+`npm`, `pnpm`, `yarn` of `bun`-script met veilige argumenten. Uitvoer is een gewone relatieve map (een
+segment mag met een punt beginnen, zoals `.output/public`, maar nooit `.`, `..` of `.git`). Een onbekende
+sleutel in `build` weigert, zodat een tikfout niet stil op een standaard terugvalt. Daarna
 gaan de waarden alleen via omgevingsvariabelen naar een `run:`-stap; er staat geen expression uit
 het manifest in shelltekst.
 
@@ -228,11 +261,92 @@ De bouwlaag zelf wordt buiten de werkmap van het project uitgecheckt. Een klant 
 ieder manifestveld met shellsubstitutie, backticks, puntkomma, newline en `../`, en bewijst dat ze
 allemaal al bij het lezen falen.
 
+## Lovable-projecten, en bouwen op verzoek
+
+Een Lovable-project is TanStack Start met Vite en `bun.lock`. Met prerender aan in `vite.config.ts` levert
+`vite build` gewone bestanden in `.output/public`, plus een serverbundel in `.output/server` die nooit
+gepubliceerd mag worden. Het manifest zegt dat met `"profile": "lovable"`; zie `notift.lovable.example.json`.
+
+| Veld | Waarden | Standaard |
+|---|---|---|
+| `build.profile` | `static`, `lovable` | `static`: elke site van voor dit veld |
+| `build.manager` | `npm`, `pnpm`, `yarn`, `bun` | `npm`. Bij `lovable` verplicht `bun` |
+| `build.bun` | exacte versie, `1.4.4`; nooit `latest` of een bereik | Verplicht bij `bun`, verboden zonder |
+| `build.output` | bij `lovable` precies `.output/public` | |
+| `build.trigger` | `push`, `manual` | `manual` bij `lovable`, anders `push` |
+| `build.install_scripts` | `none`, of een lijst van hoogstens tien pakketnamen (niet bij bun) | `none`; alleen een `static`-site met npm, pnpm of yarn zonder dit veld houdt zijn oude gedrag (alles) |
+
+**Wat er in job 1 bij komt:** installeren gaat altijd met vaste lockfile (`bun install --frozen-lockfile
+--ignore-scripts`, `npm ci --ignore-scripts`), en een opt-in draait alleen de scripts van de genoemde pakketten
+(`npm rebuild <naam>`). Daarna zet `stage_output.py` precies `build.output` klaar in `runner.temp/notift-site`
+(geen verwijzing naar buiten, geen mapverwijzing, geen hardlink, geen speciaal bestand); de keuring en het artefact
+gaan over die map, dus een buurmap als `.output/server` wordt nooit gelezen. Bij profiel `lovable` draait daarna
+`checks/check_lovable.py --source <repo> --output <klaargezette map>`: de bronkeuring, de vereiste routes en de
+uitvoer. Job 2 herhaalt alleen de uitvoerkeuring, op de bouwcontext (zie "Waarom twee jobs"). De bronkeuring is
+daarmee terugkoppeling op een eerlijke build en geen grens: in job 1 draaide al klantcode. Voor de installatie,
+dus voordat er klantcode draait, meldt `warn_lovable_sync.sh` een tak `lovable-sync*` als waarschuwing in de
+samenvatting.
+
+**Wanneer er gepubliceerd wordt** (`checks/publish_policy.py`, in beide jobs dezelfde regels):
+
+| | Regel | Job 1 | Job 2 |
+|---|---|---|---|
+| 1 | Alleen `refs/heads/main` publiceert | groene run, niets gebouwd | weigert |
+| 2 | Alleen `push` en `workflow_dispatch` publiceren | groene run, niets gebouwd | weigert |
+| 3 | Beleid `lovable-on-request` van de aanroeper: manifest moet profiel `lovable` zeggen, alleen `workflow_dispatch` bouwt, wat `build.trigger` ook zegt | rood bij een ander profiel, anders als 4 | weigert |
+| 4 | Zonder beleid beslist het manifest: bij `trigger: manual` bouwt alleen `workflow_dispatch` | groene run, niets gebouwd | weigert |
+
+Job 2 draait alleen als job 1 `go` zei, maar beslist zelf opnieuw: komt hij tegen deze regels toch aan de beurt,
+dan heeft job 1 gelogen en weigert hij. Elke run schrijft een eigen tag (`<build>-<run>-<poging>`), en per module
+loopt er één bouw per soort start en één publicatie tegelijk (`concurrency`, een nieuwere wachtende vervangt een
+oudere wachtende, een lopende wordt nooit afgebroken). Uitrollen gaat altijd op de digest.
+
+**De aanroeper voor een Lovable-project van Notift (DFY).** Profiel, trigger en verplichte tak zijn beleid van
+Notift, niet iets wat het manifest kan omzetten: de aanroeper geeft `policy: lovable-on-request` mee, en heeft
+geen `on: push`, zodat een push nul minuten kost:
+
+```yaml
+name: Publiceren
+
+on:
+  workflow_dispatch:
+
+jobs:
+  publiceren:
+    uses: notift/build/.github/workflows/build-and-publish.yml@v1
+    with:
+      policy: lovable-on-request
+    permissions:
+      contents: read
+      packages: write
+    secrets:
+      NOTIFT_DEPLOY_SECRET: ${{ secrets.NOTIFT_DEPLOY_SECRET }}
+```
+
+**De aanroeper moet beschermd zijn, anders is het beleid een wens.** Wie `.github/workflows/` in een repo met
+`packages: write` op het pakket kan wijzigen, kan elke controle omzeilen: hij laat `policy` weg, of schrijft een
+eigen workflow die rechtstreeks naar `ghcr.io/notift/<module>` pusht. Daarom, per DFY-repo in de organisatie:
+
+| | Wat | Waar |
+|---|---|---|
+| 1 | Een push-ruleset op organisatieniveau die wijzigingen onder `.github/**` weigert voor iedereen behalve de beheerders van Notift (restrict file paths) | Organisatie, rulesets |
+| 2 | De GitHub-app van Lovable zonder recht op `workflows`; dan weigert GitHub een push die een workflowbestand raakt al zelf | Organisatie, geïnstalleerde apps |
+| 3 | Een geweigerde push van Lovable komt op een tak `lovable-sync*` en de volgende build waarschuwt daarover | Vanzelf |
+
+Starten: de knop "Run workflow" in GitHub, `gh workflow run publish.yml --ref main`, of later de knop in het
+dashboard via de dispatch-API. Een handmatige start op een andere tak bouwt niets.
+
+**DWY (variant A).** Dezelfde aanroeper in de eigen repo van de klant, op zijn eigen minuten, zonder `policy`: daar
+is het manifest de keuze van de klant, en houdt hij `on: push` aan, dan houdt `trigger: manual` de push tegen.
+Regels 1 en 2 gelden ook daar.
+
 ## Wat de volgende laag uit een publicatie krijgt
 
 De reusable workflow geeft naast `digest` en `build` ook `image`, `module`, `project`, `package`,
 `repository`, `ref`, `commit`, `workflow`, `run_id` en `run_attempt` terug. `image` is altijd de
-volledige vorm `ghcr.io/notift/mod_00001@sha256:...`; een tag is nooit een uitrolopdracht.
+volledige vorm `ghcr.io/notift/mod_00001@sha256:...`; een tag is nooit een uitrolopdracht. De tag is
+`<build>-<run>-<poging>`, uniek per run en poging, zodat twee starts op dezelfde commit en minuut elkaars tag
+niet overschrijven.
 
 De platformontvanger moet vóór hij een opdracht opslaat controleren dat de ondertekende repo bij
 de module hoort, dat package en module exact overeenkomen, en dat `ref` precies
@@ -325,7 +439,7 @@ en stopt met een fout als `gh` niet beschikbaar of niet ingelogd is.
 | 1 | ~~Een repo `notift/build` aanmaken met een tag `v1`~~ **Gedaan 2026-09-04.** **Publiek**, want een projectrepo kan een prive workflow-repo niet uitchecken. `v1` staat en publiceren gaat met `release.sh`. **Er komt nooit iets in deze repo dat niet openbaar mag zijn** | GitHub |
 | 2 | ~~Elke `uses:` vastzetten op een commit-hash~~ **Gedaan 2026-09-04.** Alle vier de actions staan vast op een hash, met de versie als commentaar erachter. Meteen ook naar de actuele hoofdversie, want alle vier stonden een major achter en draaien nu op node24. Nagekeken dat elke invoerwaarde die wij gebruiken daar nog bestaat | `workflow/build-and-publish.yml` |
 | 3 | ~~Het basisimage publiceren~~ **Gedaan 2026-09-04.** Staat sinds 9 november op **versie 7**, digest `sha256:cbd5b0ac`: de poort en de map voor redirects per pad, en `security.txt` met `Expires` uit de build. Versie 6 (`sha256:64f027ff`, 1 oktober): `$uri.html` voor `$uri/`, want een pagina naast een map van dezelfde naam liep in een lus. Versie 5 (`sha256:2cc3dd81`, 24 september) bracht doorverwijzingen zonder de interne poort, en een 301 voor een slash aan het eind en voor `.html`. Versie 4 (`sha256:a36a47e5`) stuurde `/` in een lus naar zichzelf en is vervangen. Versie 3 (`sha256:31bcdc43`) was de eerste die werkelijk van de organisatie is. Versie 1 en 2 zijn weg: die hoorden bij het gebruikersaccount en hielden de naam bezet. Nagemeten op het gepubliceerde image: geen root, poort 8080, `/_health` antwoordt vanuit een alleen-lezen container, en een niet-bestaande pagina geeft 404 en geen 200 | Eenmalig |
-| 4 | ~~Het deployeraccount en het token~~ **Gedaan 2026-09-04.** `notift-deploy` is **lid van de organisatie** met Read op het pakket `prj_00001`. Lid worden was nodig omdat een organisatie pakkettoegang alleen aan leden en teams geeft. Het kan alleen veilig doordat de standaardrechten van de organisatie op `none` staan, anders had dit account leesrecht op elke repo gekregen. Het token staat in `/root/.docker/config.json` op `web-01` en `platform-01` en **verloopt op 2026-12-03**. Vernieuwen: `token-renewal.md`. Per nieuw project moet de pakkettoegang opnieuw gegeven worden, en daar is geen API voor | GitHub plus de machine |
+| 4 | ~~Het deployeraccount en het token~~ **Gedaan 2026-09-04.** `notift-deploy` is **lid van de organisatie** met Read op het pakket `prj_00001`. Lid worden was nodig omdat een organisatie pakkettoegang alleen aan leden en teams geeft. Het kan alleen veilig doordat de standaardrechten van de organisatie op `none` staan, anders had dit account leesrecht op elke repo gekregen. Het token staat in `/root/.docker/config.json` op `web-01` en `platform-01` en **verloopt op 2027-02-16** (vernieuwd 2026-11-18). Vernieuwen: `token-renewal.md`. Per nieuw project moet de pakkettoegang opnieuw gegeven worden, en daar is geen API voor | GitHub plus de machine |
 | 5 | Per project een `notift.json` en een workflow van drie regels die de onze aanroept. Zie `notift/testsite` als voorbeeld dat werkt | Per klant |
 
 Punt 4 is een bewuste keuze en geen gemak: zie doel 3 in `docs/07-bouwlaag.md`, met de reden en de

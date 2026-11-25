@@ -1,8 +1,11 @@
 # Het image van een site: het basisimage van Notift plus de gebouwde map van de
 # klant. Meer gebeurt er niet, en dat is doel 2 van docs/07-bouwlaag.md.
 #
-# Wordt gebruikt door de workflow, niet met de hand. De bouwcontext is de map
-# waarin de workflow `site/` heeft klaargezet.
+# Wordt gebruikt door de workflow, niet met de hand. De bouwcontext bouwt job 2
+# zelf op in runner.temp, buiten elke checkout van de klant: precies deze
+# Dockerfile, redirects.map en site/ met alleen gekeurde gewone bestanden
+# (checks/transfer.py verify-context meet dat vlak voor de build). Er is dus
+# geen .dockerignore van de klant en geen verwijzing die COPY kan volgen.
 
 ARG BASE
 FROM ${BASE}
